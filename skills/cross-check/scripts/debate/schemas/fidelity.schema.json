@@ -1,0 +1,59 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "status",
+  "issues",
+  "unverified"
+ ],
+ "properties": {
+  "status": {
+   "type": "string",
+   "enum": [
+    "COMPLETE",
+    "INCOMPLETE"
+   ]
+  },
+  "issues": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "verdict",
+     "detail",
+     "evidence_refs"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "verdict": {
+      "type": "string",
+      "enum": [
+       "faithful",
+       "distorted",
+       "omitted"
+      ]
+     },
+     "detail": {
+      "type": "string"
+     },
+     "evidence_refs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  },
+  "unverified": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ }
+}

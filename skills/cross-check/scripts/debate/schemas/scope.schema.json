@@ -1,0 +1,54 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "question",
+  "allowed_paths",
+  "excluded_paths",
+  "allowed_tools",
+  "external_transfer",
+  "notes"
+ ],
+ "properties": {
+  "question": {
+   "type": "string"
+  },
+  "allowed_paths": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "excluded_paths": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "allowed_tools": {
+   "type": "array",
+   "items": {
+    "type": "string",
+    "enum": [
+     "shell",
+     "context7",
+     "aws-api",
+     "web"
+    ]
+   }
+  },
+  "external_transfer": {
+   "type": "string",
+   "enum": [
+    "none",
+    "public-docs-queries-only"
+   ]
+  },
+  "notes": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ }
+}

@@ -1,0 +1,2 @@
+Phase proposal: independently investigate the question in the brief within the scope and propose a design. You have not seen Claude's proposal and must not look for it.
+Map every requirement in the brief to an approach, describe components, flows and contracts, list rejected alternatives with reasons, an implementation order, validation (local, mock or user-real), risks with mitigations, assumptions, evidence, open questions and unverified items. Set phase to "proposal" and side to "codex". Set evidence_sufficiency honestly.

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Handoff"
+  short_description: "새 채팅과 필요한 에이전트 위임을 위한 작업 인계"
+  default_prompt: "Use $handoff to prepare a concise handoff for continuing this task."
+policy:
+  allow_implicit_invocation: true

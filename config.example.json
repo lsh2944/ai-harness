@@ -1,0 +1,17 @@
+{
+  "project_root": "~/project",
+  "memory_dir": null,
+  "python": null,
+  "response_language": "Korean",
+  "comment_language": "Japanese",
+  "extra_protected_paths": [],
+  "aws": {
+    "profile": "claude-assumed",
+    "assume_role_cmd": "~/ai-harness/tools/aws/assume_role.sh",
+    "assume_role_envs": ["DEV"],
+    "roles": {
+      "DEV": "arn:aws:iam::123456789012:role/example-read-only"
+    },
+    "mfa_serial": "arn:aws:iam::123456789012:mfa/example-device"
+  }
+}

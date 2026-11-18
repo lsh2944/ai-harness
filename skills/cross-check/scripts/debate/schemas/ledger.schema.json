@@ -1,0 +1,266 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "issues",
+  "states"
+ ],
+ "properties": {
+  "issues": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "origin",
+     "type",
+     "importance",
+     "title",
+     "requirement_ref",
+     "claude",
+     "codex",
+     "turns",
+     "decision_method",
+     "verification",
+     "status"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "origin": {
+      "type": "string",
+      "enum": [
+       "claude",
+       "codex",
+       "reveal-diff"
+      ]
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "fact",
+       "design-tradeoff",
+       "preference",
+       "scope"
+      ]
+     },
+     "importance": {
+      "type": "string",
+      "enum": [
+       "high",
+       "medium",
+       "low"
+      ]
+     },
+     "title": {
+      "type": "string"
+     },
+     "requirement_ref": {
+      "type": "string"
+     },
+     "claude": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "position",
+       "stance",
+       "evidence_ids"
+      ],
+      "properties": {
+       "position": {
+        "type": "string"
+       },
+       "stance": {
+        "type": "string",
+        "enum": [
+         "pending",
+         "proposed",
+         "accept",
+         "reject",
+         "conditional",
+         "open"
+        ]
+       },
+       "evidence_ids": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "codex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "position",
+       "stance",
+       "evidence_ids"
+      ],
+      "properties": {
+       "position": {
+        "type": "string"
+       },
+       "stance": {
+        "type": "string",
+        "enum": [
+         "pending",
+         "proposed",
+         "accept",
+         "reject",
+         "conditional",
+         "open"
+        ]
+       },
+       "evidence_ids": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "turns": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "phase",
+        "speaker",
+        "kind",
+        "text",
+        "evidence_ids",
+        "would_change_if"
+       ],
+       "properties": {
+        "phase": {
+         "type": "string",
+         "enum": [
+          "P2",
+          "P3",
+          "P4"
+         ]
+        },
+        "speaker": {
+         "type": "string",
+         "enum": [
+          "claude",
+          "codex"
+         ]
+        },
+        "kind": {
+         "type": "string",
+         "enum": [
+          "critique",
+          "response",
+          "answer"
+         ]
+        },
+        "text": {
+         "type": "string"
+        },
+        "evidence_ids": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "would_change_if": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "decision_method": {
+      "type": "string",
+      "enum": [
+       "pending",
+       "source-text",
+       "reproduction",
+       "user-decision",
+       "undecidable"
+      ]
+     },
+     "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "method",
+       "result",
+       "evidence_ids"
+      ],
+      "properties": {
+       "method": {
+        "type": "string"
+       },
+       "result": {
+        "type": "string",
+        "enum": [
+         "confirmed",
+         "refuted",
+         "unverified"
+        ]
+       },
+       "evidence_ids": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "agreed",
+       "resolved-by-evidence",
+       "conditional",
+       "open-user",
+       "open-unverified"
+      ]
+     }
+    }
+   }
+  },
+  "states": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "execution",
+    "evidence_sufficiency",
+    "agreement"
+   ],
+   "properties": {
+    "execution": {
+     "type": "string",
+     "enum": [
+      "in-progress",
+      "ok",
+      "failed",
+      "stopped"
+     ]
+    },
+    "evidence_sufficiency": {
+     "type": "string",
+     "enum": [
+      "sufficient",
+      "partial",
+      "insufficient"
+     ]
+    },
+    "agreement": {
+     "type": "string",
+     "enum": [
+      "pending",
+      "agreed",
+      "partial",
+      "disagreed"
+     ]
+    }
+   }
+  }
+ }
+}

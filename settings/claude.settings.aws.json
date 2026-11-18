@@ -1,0 +1,10 @@
+{
+  "env": {
+    "AWS_PROFILE": "{{AWS_PROFILE}}"
+  },
+  "permissions": {
+    "ask": [
+      "Edit(/{{ASSUME_ROLE_CMD}})"
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{"type":"object","additionalProperties":false,
+ "required":["verdict","checked_files","findings","unverified"],
+ "properties":{
+  "verdict":{"type":"string","enum":["PASS","FAIL","INCOMPLETE"]},
+  "checked_files":{"type":"array","items":{"type":"string"}},
+  "findings":{"type":"array","items":{"type":"object","additionalProperties":false,
+    "required":["severity","category","source_location","result_location","description"],
+    "properties":{"severity":{"type":"string","enum":["blocker","major","minor"]},
+     "category":{"type":"string","enum":["info_loss","condition_confusion","added_fact","index","broken_reference","original_not_preserved","other"]},
+     "source_location":{"type":"string"},"result_location":{"type":"string"},"description":{"type":"string"}}}},
+  "unverified":{"type":"array","items":{"type":"string"}}}}

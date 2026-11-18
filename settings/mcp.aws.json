@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "aws-api": {
+      "env": {
+        "AWS_API_MCP_PROFILE_NAME": "{{AWS_PROFILE}}",
+        "READ_OPERATIONS_ONLY": "true"
+      }
+    }
+  }
+}

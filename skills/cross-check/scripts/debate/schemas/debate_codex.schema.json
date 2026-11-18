@@ -1,0 +1,146 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "status",
+  "critique_of_claude",
+  "responses_to_claude_critique",
+  "useful_from_other",
+  "useful_none_reason",
+  "revised_position_summary",
+  "unverified"
+ ],
+ "properties": {
+  "status": {
+   "type": "string",
+   "enum": [
+    "COMPLETE",
+    "INCOMPLETE"
+   ]
+  },
+  "critique_of_claude": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "type",
+     "importance",
+     "claim",
+     "evidence_refs",
+     "alternative",
+     "would_change_if"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "fact",
+       "design-tradeoff",
+       "preference",
+       "scope"
+      ]
+     },
+     "importance": {
+      "type": "string",
+      "enum": [
+       "high",
+       "medium",
+       "low"
+      ]
+     },
+     "claim": {
+      "type": "string"
+     },
+     "evidence_refs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "alternative": {
+      "type": "string"
+     },
+     "would_change_if": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "responses_to_claude_critique": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "stance",
+     "argument",
+     "evidence_refs",
+     "would_change_if"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "stance": {
+      "type": "string",
+      "enum": [
+       "accept",
+       "reject",
+       "conditional",
+       "open"
+      ]
+     },
+     "argument": {
+      "type": "string"
+     },
+     "evidence_refs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "would_change_if": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "useful_from_other": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "point",
+     "adopt_condition"
+    ],
+    "properties": {
+     "point": {
+      "type": "string"
+     },
+     "adopt_condition": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "useful_none_reason": {
+   "type": "string"
+  },
+  "revised_position_summary": {
+   "type": "string"
+  },
+  "unverified": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ }
+}

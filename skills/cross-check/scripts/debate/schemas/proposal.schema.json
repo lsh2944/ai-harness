@@ -1,0 +1,232 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "phase",
+  "side",
+  "status",
+  "evidence_sufficiency",
+  "summary",
+  "requirement_mapping",
+  "design",
+  "alternatives",
+  "implementation_order",
+  "validation",
+  "risks",
+  "assumptions",
+  "evidence",
+  "open_questions",
+  "unverified"
+ ],
+ "properties": {
+  "phase": {
+   "type": "string",
+   "enum": [
+    "proposal"
+   ]
+  },
+  "side": {
+   "type": "string",
+   "enum": [
+    "codex",
+    "claude"
+   ]
+  },
+  "status": {
+   "type": "string",
+   "enum": [
+    "COMPLETE",
+    "INCOMPLETE"
+   ]
+  },
+  "evidence_sufficiency": {
+   "type": "string",
+   "enum": [
+    "sufficient",
+    "partial",
+    "insufficient"
+   ]
+  },
+  "summary": {
+   "type": "string"
+  },
+  "requirement_mapping": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "requirement",
+     "approach"
+    ],
+    "properties": {
+     "requirement": {
+      "type": "string"
+     },
+     "approach": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "design": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "components",
+    "flows",
+    "contracts"
+   ],
+   "properties": {
+    "components": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "flows": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "contracts": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "alternatives": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "option",
+     "reason_rejected"
+    ],
+    "properties": {
+     "option": {
+      "type": "string"
+     },
+     "reason_rejected": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "implementation_order": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "validation": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "check",
+     "layer"
+    ],
+    "properties": {
+     "check": {
+      "type": "string"
+     },
+     "layer": {
+      "type": "string",
+      "enum": [
+       "local",
+       "mock",
+       "user-real"
+      ]
+     }
+    }
+   }
+  },
+  "risks": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "severity",
+     "risk",
+     "mitigation"
+    ],
+    "properties": {
+     "severity": {
+      "type": "string",
+      "enum": [
+       "high",
+       "medium",
+       "low"
+      ]
+     },
+     "risk": {
+      "type": "string"
+     },
+     "mitigation": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "assumptions": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "evidence": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "kind",
+     "ref",
+     "observation"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "file",
+       "command",
+       "mcp",
+       "web",
+       "brief",
+       "inference"
+      ]
+     },
+     "ref": {
+      "type": "string"
+     },
+     "observation": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "open_questions": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "unverified": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ }
+}

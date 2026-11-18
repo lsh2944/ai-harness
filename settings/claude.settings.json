@@ -1,0 +1,46 @@
+{
+  "env": {
+    "BASH_MAX_OUTPUT_LENGTH": "15000"
+  },
+  "bashOutputMaxChars": 15000,
+  "permissions": {
+    "deny": [
+      "Read(~/.aws/credentials)",
+      "Edit(~/.aws/**)",
+      "Bash(cdk deploy *)",
+      "Bash(cdk destroy *)",
+      "Bash(npx cdk deploy *)",
+      "Bash(npx cdk destroy *)"
+    ],
+    "ask": [
+      "Bash(git clean *)",
+      "Bash(git rm *)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/hooks/**)",
+      "Edit(~/.claude.json)",
+      "Edit(/{{HARNESS_HOME}}/hooks/**)",
+      "Edit(/{{HARNESS_HOME}}/install/**)",
+      "Edit(/{{HARNESS_HOME}}/settings/**)",
+      "Edit(/{{HARNESS_HOME}}/tools/aws/**)",
+      "Edit(/{{HARNESS_HOME}}/config.local.json)"
+    ],
+    "defaultMode": "auto",
+    "disableBypassPermissionsMode": "disable"
+  },
+  "workflowKeywordTriggerEnabled": false,
+  "skillOverrides": {
+    "cowork-plugin-management:cowork-plugin-customizer": "off",
+    "cowork-plugin-management:create-cowork-plugin": "off",
+    "anthropic-skills:morning": "off",
+    "anthropic-skills:import-memory": "off",
+    "anthropic-skills:docs": "off"
+  },
+  "autoMode": {
+    "hard_deny": [
+      "$defaults",
+      "AWS 등 클라우드 리소스를 생성·변경·삭제하는 조작, 메시지 발행(MQTT publish 등), 함수 호출(Lambda invoke 등), 워크플로 실행(Step Functions 등), 각종 배포(cdk/sam/terraform, npm의 deploy 스크립트 등). 클라우드는 조회(describe/get/list/scan/query/logs)만 허용.",
+      "/tmp·scratchpad 등 임시 디렉터리 및 검증된 Python 바이트코드 캐시 밖의 파일을 사용자 승인 없이 삭제하는 조작. 캐시 예외는 일반 .pyc 파일만 든 __pycache__ 폴더와 그 안의 .pyc 파일에 한하며, 일반 파일 혼합·심볼릭 링크·불명확한 삭제 명령·git clean·임의 스크립트 삭제에는 적용하지 않는다.",
+      "가드 hook(~/.claude/hooks/, ~/.codex/hooks/), 하네스 원본(hooks/·install/·settings/·tools/aws/·config.local.json), 권한 설정(settings.json, settings.local.json의 deny/ask/hooks), 클라우드 인증 설정(~/.aws/, AWS_PROFILE, 인증 갱신 스크립트, MCP aws-api env)을 약화·해제·우회하는 변경."
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cross-check"
+  short_description: "Manually run a Claude-Codex design debate or cross-check designs, test plans, and code"
+  default_prompt: "Use $cross-check only for the design debate, review, test plan, or code changes I specify."
+policy:
+  allow_implicit_invocation: false

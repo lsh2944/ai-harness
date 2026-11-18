@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task metrics"
+  short_description: "Record observed task usage, verification, and rework"
+  default_prompt: "Use $task-metrics to record or summarize observed work metrics without estimating missing usage."

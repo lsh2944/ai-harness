@@ -1,0 +1,23 @@
+# ai-harness が ~/.codex/config.toml に適用する断片（install.py が解釈する。そのまま貼り付けない）。
+# 秘密値（MCP の env・shell_environment_policy.set の値）は含めない。
+# hook ブロック（# BEGIN/END shared harness hooks）は install.py が生成する。
+
+# 未設定のときだけ最上位に追加する既定値
+[defaults]
+tool_output_token_limit = 6000
+sandbox_mode = "workspace-write"
+
+# 指定キーを上書きする（同じテーブルの他のキーは保持）
+[set.agents]
+max_threads = 2
+max_depth = 1
+
+[set.sandbox_workspace_write]
+network_access = false
+
+# shell_environment_policy.exclude に追加する変数名（既存の値は保持）
+[shell_environment]
+exclude = [
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_DEFAULT_PROFILE",
+  "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
+]

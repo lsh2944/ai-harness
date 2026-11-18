@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "status", "assessment", "findings", "unverified"],
+  "properties": {
+    "mode": {"type": "string", "enum": ["review", "test-plan", "code-review"]},
+    "status": {"type": "string", "enum": ["COMPLETE", "INCOMPLETE"]},
+    "assessment": {"type": "string"},
+    "findings": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["severity", "claim", "lines", "recommendation"],
+      "properties": {
+        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+        "claim": {"type": "string"},
+        "lines": {"type": "array", "items": {"type": "integer"}},
+        "recommendation": {"type": "string"}
+      }
+    }},
+    "unverified": {"type": "array", "items": {"type": "string"}}
+  }
+}

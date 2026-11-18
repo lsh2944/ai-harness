@@ -1,0 +1,4 @@
+Phase debate: both frozen proposals and the issue ledger excerpt are below. Do two separate things in two separate fields:
+1. critique_of_claude: critique Claude's proposal. Each item needs a stable issue_id (use `C<n>` for new issues you raise, or an existing ledger id), type, importance, claim, evidence_refs, a concrete alternative and what evidence would change your view.
+2. responses_to_claude_critique: answer EVERY ledger issue whose origin is claude or reveal-diff with importance high or medium, using the same issue_id. Give stance accept, reject, conditional or open, an argument with evidence_refs and would_change_if.
+List useful points from Claude's proposal in useful_from_other with adoption conditions; if there are none, explain why in useful_none_reason. Summarize your revised position. You may investigate further within scope to settle facts.

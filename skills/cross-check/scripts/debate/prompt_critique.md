@@ -1,0 +1,2 @@
+Phase critique (frozen-critique protocol): both frozen proposals are below. Claude writes its critique of your proposal separately and you will not see it in this call.
+Put your critique of Claude's proposal in critique_of_claude (issue ids `C<n>`; type, importance, claim, evidence_refs, alternative, would_change_if). responses_to_claude_critique must be an empty array in this phase. List useful points from Claude's proposal in useful_from_other, or explain why there are none in useful_none_reason.

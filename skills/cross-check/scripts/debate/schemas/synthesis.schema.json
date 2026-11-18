@@ -1,0 +1,179 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "decisions",
+  "required",
+  "optional",
+  "user_decisions",
+  "unresolved",
+  "useful_from_codex",
+  "useful_none_reason",
+  "metrics"
+ ],
+ "properties": {
+  "decisions": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "decision",
+     "adopted_from",
+     "reason",
+     "rejected_alternatives",
+     "conditions",
+     "residual_risk",
+     "codex_checked"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "decision": {
+      "type": "string"
+     },
+     "adopted_from": {
+      "type": "string",
+      "enum": [
+       "claude",
+       "codex",
+       "both",
+       "neither",
+       "evidence"
+      ]
+     },
+     "reason": {
+      "type": "string"
+     },
+     "rejected_alternatives": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "conditions": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "residual_risk": {
+      "type": "string"
+     },
+     "codex_checked": {
+      "type": "boolean"
+     }
+    }
+   }
+  },
+  "required": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "optional": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "user_decisions": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "question",
+     "options"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "question": {
+      "type": "string"
+     },
+     "options": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  },
+  "unresolved": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "issue_id",
+     "impact",
+     "needed_evidence",
+     "blocking"
+    ],
+    "properties": {
+     "issue_id": {
+      "type": "string"
+     },
+     "impact": {
+      "type": "string"
+     },
+     "needed_evidence": {
+      "type": "string"
+     },
+     "blocking": {
+      "type": "boolean"
+     }
+    }
+   }
+  },
+  "useful_from_codex": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "useful_none_reason": {
+   "type": "string"
+  },
+  "metrics": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "one_side_confirmed_findings",
+    "missing_required",
+    "unbacked_claims"
+   ],
+   "properties": {
+    "one_side_confirmed_findings": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "claude",
+      "codex"
+     ],
+     "properties": {
+      "claude": {
+       "type": "integer"
+      },
+      "codex": {
+       "type": "integer"
+      }
+     }
+    },
+    "missing_required": {
+     "type": "integer"
+    },
+    "unbacked_claims": {
+     "type": "integer"
+    }
+   }
+  }
+ }
+}

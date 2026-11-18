@@ -1,0 +1,3 @@
+# --with-aws のときだけ重ねる断片。AI のシェルを読み取り専用プロファイルに固定する。
+[set."shell_environment_policy.set"]
+AWS_PROFILE = "{{AWS_PROFILE}}"

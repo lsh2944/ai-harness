@@ -1,0 +1,8 @@
+{
+  "pins": {
+    "@upstash/context7-mcp": "@upstash/context7-mcp@4.1.1",
+    "@upstash/context7-mcp@latest": "@upstash/context7-mcp@4.1.1",
+    "@playwright/mcp": "@playwright/mcp@0.0.82",
+    "@playwright/mcp@latest": "@playwright/mcp@0.0.82"
+  }
+}
