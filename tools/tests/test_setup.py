@@ -186,7 +186,8 @@ class SetupScriptTests(Fixture):
 
     def test_missing_hook_exec_bit_is_reported(self):
         # 実行権限のない hook は git が黙って飛ばすため、post-commit も含めて警告する
-        for name in ('pre-commit', 'post-merge', 'post-commit'):
+        hooks = ('pre-commit', 'commit-msg', 'post-merge', 'post-commit')
+        for name in hooks:
             with self.subTest(hook=name):
                 hook = self.clone / '.githooks' / name
                 hook.chmod(0o644)
@@ -194,7 +195,7 @@ class SetupScriptTests(Fixture):
                     code, out = self.setup(self.ANSWERS, '--no-apply')
                     self.assertEqual(code, 0, out)
                     self.assertIn(f'.githooks/{name} 에 실행 권한이 없어', out)
-                    others = {'pre-commit', 'post-merge', 'post-commit'} - {name}
+                    others = set(hooks) - {name}
                     self.assertFalse(any(f'.githooks/{o} 에 실행 권한' in out for o in others), out)
                 finally:
                     hook.chmod(0o755)

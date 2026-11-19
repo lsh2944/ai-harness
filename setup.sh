@@ -104,7 +104,7 @@ elif [ -z "$hooks" ] || confirm "[2/5] core.hooksPath가 이미 '$hooks'로 설�
 else
     echo "[2/5] core.hooksPath를 바꾸지 않았습니다. 이 저장소의 hook은 동작하지 않습니다."
 fi
-for hook in .githooks/pre-commit .githooks/post-merge .githooks/post-commit; do
+for hook in .githooks/pre-commit .githooks/commit-msg .githooks/post-merge .githooks/post-commit; do
     if [ ! -x "$hook" ]; then
         echo "      주의: $hook 에 실행 권한이 없어 git이 실행하지 않습니다(chmod +x 필요)." >&2
     fi
