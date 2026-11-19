@@ -207,6 +207,9 @@ python3 tools/privacy_check.py --all
 - `settings.json`의 보호용 강제 키(`--with-aws`의 `env.AWS_PROFILE`)는 기존 값과 달라도 덮어쓰며, dry-run에 `WARN … will be overwritten`으로 표시한다(값은 출력하지 않음).
 - 인증 갱신 스크립트는 `<aws.assume_role_cmd> --awsEnv <등록 환경>`의 단독 실행(또는 `echo <6자리> |` 입력)만 허용하고, 변수 대입·`env`/`export`·래퍼·인터프리터 경유·다른 명령과의 연결은 승인 요청. `tools/aws/assume_role.py`는 저장소의 `config.local.json`만 읽는다.
 - 어느 프로젝트든 `.claude/settings*.json` 수정은 승인 요청.
+- Bash 쓰기 판정은 명령별 쓰기 대상을 hook 입력 cwd와 명령 안의 `cd`·`pushd`·`eval`·`sh -c`를 따라 절대·실제 경로로 바꿔 보호 경로와 비교한다. `cp`·`ln`·`install`·`rsync`는 대상만, `mv`는 원본·대상, `chmod`는 경로 인자를 보며, `dd of=`·`curl -o`·`wget -O`의 출력 파일도 판정한다. 보호 경로의 상위 폴더를 `mv`·`ln`·`chmod`하면 승인 요청. `patch`·`git apply/checkout/restore/stash`는 작업 위치가 보호 경로 안·상위·하네스 안이면, `tar -x`·`unzip`은 보호 디렉터리 안이면 승인 요청.
+- `cd` 대상을 확정할 수 없으면(변수·치환·`cd -` 등) 이후 상대 경로 쓰기는 승인 요청, hook 입력에 cwd가 없으면 보호 이름으로 판정한다. 하네스 저장소 안에서 쓰기 대상에 확장되지 않는 `$변수`가 있으면 승인 요청.
+- 따옴표 구분자 heredoc(`<<'EOF'`) 본문은 `cat`·`tee`·`git commit/tag -F -`(git 메시지의 `$(cat <<'EOF')` 포함)가 데이터로만 읽을 때만 쓰기 판정에서 뺀다. 64KB를 넘는 Bash 명령은 판정 전에 승인 요청(Codex는 거부)해 정규식 시간 초과로 판정 없이 실행되는 일을 막는다.
 - 파일 삭제는 임시 디렉터리·검증된 `__pycache__` 밖이면 승인 요청, 비밀 파일(`~/.aws` 허용 목록 외, Codex·Claude 인증 파일) 읽기는 거부, 가드·설정·하네스 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`·`config.local.json`)·인증 갱신 스크립트 수정은 승인 요청.
 - AWS 변경·배포·비밀 출력 명령은 항상 거부한다. `--with-aws`일 때만 프로필을 `aws.profile`로 고정하고, 등록된 환경 이름의 인증 갱신 스크립트 실행을 예외로 허용한다. AWS 모듈 없이도 원시 자격증명 주입(`AWS_ACCESS_KEY_ID=` 등)·자격증명 파일 경로 변경은 거부한다.
 
@@ -217,9 +220,9 @@ python3 tools/privacy_check.py --all
 ## 알려진 한계
 
 - 가드는 **명령 문자열을 검사하는 보조 방어**이며 완전한 셸 파서가 아니다. 설정 문구나 heredoc 안의 `npm run deploy`, `aws …`로 시작하는 줄, 비밀 파일 경로 문자열 같은 무해한 텍스트도 차단될 수 있다. 차단되면 다른 도구·스크립트로 우회하지 말고 문구를 바꾸거나 파일 편집 도구를 쓴다.
-- Bash 쓰기 대상의 상대 경로는 hook 입력의 cwd(명령 안의 `cd` 포함) 기준으로 해석해 보호 경로와 비교한다. 2026-11-19 이전 가드는 절대 경로 문자열만 판정해, 저장소 폴더 안에서 `sed -i … hooks/guard.py`처럼 상대 경로로 쓰면 승인 없이 통과했다. 지금도 변수·명령 치환·스크립트 파일 안의 경로는 판정할 수 없으므로, 하네스 파일은 Bash(sed·리다이렉트·heredoc)가 아니라 Edit/Write 도구로만 수정한다.
+- Bash 쓰기 대상의 상대 경로는 hook 입력의 cwd(명령 안의 `cd` 포함) 기준으로 해석해 보호 경로와 비교한다. 2026-11-19 이전 가드는 절대 경로 문자열만 판정해, 저장소 폴더 안에서 `sed -i … hooks/guard.py`처럼 상대 경로로 쓰면 승인 없이 통과했다. 지금도 하네스 밖에서 변수·명령 치환으로 만든 경로, 스크립트 파일 안의 경로, `python - <<EOF` 본문의 파일 쓰기는 판정할 수 없고, `wget` 기본 파일명·`-P`, `curl -O`·`--output-dir`·`-c`/`-D`, `git reset/pull/merge/switch`, `touch`, `awk -i inplace`, `CDPATH`, `source`로 읽은 스크립트 안의 `cd`도 판정하지 않는다. 서브셸의 `cd`도 이후 후보에 남기는 등 보수적 판정이라 오탐이 날 수 있다. 그러므로 하네스 파일은 Bash(sed·리다이렉트·heredoc)가 아니라 Edit/Write 도구로만 수정한다.
 - 스크립트 파일 안에 적힌 삭제·SDK 쓰기 코드는 명령 검사로 잡지 못한다(AWS는 프로필 고정과 읽기 전용 역할이 실제 방어선). `python3 -m install.install --apply`, glob(`install/inst*.py`), 저장소를 통째로 복사한 설치기처럼 이름·위치를 바꾼 실행은 문자열 검사로 막지 못한다. 이 경우에도 `--apply`는 터미널 확인을 요구하지만, `script`·`pty`·`expect` 등으로 의사 터미널을 만들어 확인 문구를 넘기면 이 확인도 우회될 수 있다.
-- `HARNESS_HOME`은 Git 저장소라 `git checkout`·`reset`·`stash`·`pull` 등으로 보호 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`)이 승인 없이 바뀔 수 있고, 가드의 쓰기 판정은 git 명령을 검사하지 않는다. 단 설치된 hook·설정에 반영되려면 사용자가 터미널에서 `install.py --apply`를 실행해야 한다.
+- `HARNESS_HOME`은 Git 저장소라 `git checkout`·`reset`·`stash`·`pull` 등으로 보호 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`)이 바뀔 수 있다. 가드는 `git apply/checkout/restore/stash`만 작업 위치 기준으로 승인 요청하고 `reset`·`pull`·`merge`·`switch`는 검사하지 않는다. 단 설치된 hook·설정에 반영되려면 사용자가 터미널에서 `install.py --apply`를 실행해야 한다.
 - hook 인터프리터가 사라지면 Claude는 `guard_hook.sh`가 거부를 반환하지만, Codex는 신뢰 절차 때문에 python을 직접 실행하므로 인터프리터 소실·hook 타임아웃 시 가드 없이 실행될 수 있다. Python을 업그레이드하면 install.py를 다시 실행한다.
 - Codex exec 모드의 일부 도구(node_repl 등 MCP 외 경로)는 hook 범위 밖이다.
 - 가드 메시지·사용량 경고 문구는 한국어로 고정되어 있다.
