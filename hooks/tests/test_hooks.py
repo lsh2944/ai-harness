@@ -144,7 +144,8 @@ class GuardTests(unittest.TestCase):
             ('sudo --chdir ~/.codex rg --hidden token', 'ask'),
             ('sudo -D ~/.codex rg token', 'ask'),
             ('grep -rne token src', None),
-            ('rsync -a /tmp/pub/ ~/', None),
+            # 秘密情報の読み取りではない（deny ではない）。中身の再帰コピー先が保護パスの上位なので承認対象
+            ('rsync -a /tmp/pub/ ~/', 'ask'),
             ('tar xzf /tmp/x.tgz -C ~', None),
             ('grep -rn <HOME> src', None),
             ('rg -e . README.md', None),
@@ -647,6 +648,18 @@ class RelativeWriteTests(unittest.TestCase):
             ('rsync -a /tmp/x/ hooks/', 'ask'),
             ('rsync -a hooks/ /tmp/b/', None),
             ('rsync -a hooks/ host:/b/', None),
+            # 宛先がディレクトリなら `宛先/basename(元)`、再帰で中身をコピーするなら宛先自体の上位判定
+            ('cp -r /tmp/hooks ./', 'ask'),
+            ('cp /tmp/setup.sh .', 'ask'),
+            ('cp /tmp/setup.sh /tmp/other.txt .', 'ask'),
+            ('cp -r /tmp/x/. .', 'ask'),
+            ('cp -R /tmp/x/ .', 'ask'),
+            ('rsync -a /tmp/src/ ./', 'ask'),
+            ('rsync -a /tmp/hooks .', 'ask'),
+            ('rsync -av /tmp/src/ docs/', None),
+            ('cp /tmp/a /tmp/b .', None),
+            ('cp -r /tmp/proj docs/', None),
+            ('cp /tmp/x/. .', None),
             # find -exec cp など書き込みコマンドが引数側にあるものは従来どおり全語を対象
             ('find /tmp -name x -exec cp {} hooks/ +', 'ask'),
         ], str(self.home))
@@ -726,6 +739,10 @@ class RelativeWriteTests(unittest.TestCase):
             ("git commit --file=- <<'EOF'\necho x > hooks/guard.py\nEOF", None),
             ("tee /tmp/y <<'EOF'\ncp x hooks/guard.py\nEOF", None),
             ("cat $'a\\'b' > /tmp/o <<'X'\ncp x hooks/guard.py\nX", None),
+            # プロセス置換で別コマンドへ渡る行は本文も判定する
+            ("tee >(sh) <<'X'\necho x > hooks/guard.py\nX", 'ask'),
+            ("cat <<'X' > >(sh)\necho x > hooks/guard.py\nX", 'ask'),
+            ("cat <(echo a) <<'X'\ncp /tmp/x hooks/guard.py\nX", 'ask'),
         ], str(self.home))
 
     def test_long_commands_are_bounded(self):
@@ -736,6 +753,23 @@ class RelativeWriteTests(unittest.TestCase):
         for runtime, expected in (('claude', 'ask'), ('codex', 'deny')):
             result = run_guard(payload, runtime, guard=self.guard_path)
             self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], expected)
+        # 上限超過でも、上限判定の前にある拒否判定（線形時間）は deny を返す
+        pad = 'echo ' + 'x ' * (self.g.BASH_MAX_CHARS // 2) + '; '
+        for tail in ('cat ~/.aws/credentials', 'AWS_ACCESS_KEY_ID=x aws sts get-caller-identity',
+                     'aws ssm get-parameter --name x --with-decryption', 'cdk deploy', 'npm run deploy',
+                     'greengrass-cli deployment create', 'unset AWS_PROFILE', 'export AWS_PROFILE=other'):
+            for command in (pad + tail, tail + '; ' + pad):
+                with self.subTest(tail=tail, front=command.startswith(tail)):
+                    started = time.monotonic()
+                    self.assertEqual(self.g.check_bash(command, cwd=str(self.home))[0], 'deny')
+                    self.assertLess(time.monotonic() - started, 1.0)
+        # 上限判定の前の判定は、上限を大きく超える入力（1MB）でも線形時間で終わる
+        for unit in ('npm ', 'npm -', 'AWS_ROLE_ARN ', 'unset ', 'export ', 'cdk ', 'greengrass-cli ', 'aws ', '1'):
+            with self.subTest(unit=unit):
+                text = (unit * (2 ** 20 // len(unit)))
+                started = time.monotonic()
+                self.assertEqual(self.g.check_bash(text, cwd=str(self.home))[0], 'ask')
+                self.assertLess(time.monotonic() - started, 1.0)
         # 上限以下でも二乗時間の後戻りにならない入力（正規表現は C 実装で期限切れの割り込みが効かない）
         limit = self.g.BASH_MAX_CHARS
         for unit in ('find ', 'cd ', 'sed ', 'perl ', 'python ', 'unset ', 'xargs ', 'rsync ', 'greengrass-cli ',
@@ -758,6 +792,9 @@ class RelativeWriteTests(unittest.TestCase):
             ('cp /tmp/x tools/privacy_check.py', 'ask'),
             ('cp /tmp/x tools/aws/assume_role.sh', 'ask'),
             ('echo x > setup.sh', 'ask'),
+            ('chmod -x apply.sh', 'ask'),
+            ('cp /tmp/x ./apply.sh', 'ask'),
+            ('echo x > apply.sh.bak', None),
             ('cp a .githooks/pre-commit', 'ask'),
             ('mv /tmp/x install', 'ask'),
             ("sed -i '' 's/a/b/' docs/x.md", None),

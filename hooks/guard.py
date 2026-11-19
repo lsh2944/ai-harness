@@ -815,7 +815,7 @@ def legacy_write_text(text):
     return bool(WRITE_SIMPLE_RE.search(text) or any(ordered_search(p, text) for p in WRITE_ORDERED))
 # hook 入力に cwd がないとき、相対パスの書き込み対象がこの名前（パス要素単位）を含めば承認対象にする
 FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
-                            "privacy_check.py", "harness_setup.py", "setup.sh")
+                            "privacy_check.py", "harness_setup.py", "setup.sh", "apply.sh")
 # cd 先として字句的に確定できる引数（変数・置換・クォート・ワイルドカードを含まない）
 CD_TARGET_RE = re.compile(r"[\w./~+@%,:=-]+")
 # サブシェル・グループ・制御構文の先頭語（直後の cd を検出するため読み飛ばす）
@@ -957,6 +957,23 @@ def _cluster_has(args, letters):
     return any(a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters) for a in args)
 
 
+def _copy_destinations(target, sources, recursive):
+    """cp・rsync の実際の書き込み位置。宛先がディレクトリなら `宛先/basename(元)` に書かれるため、それも候補にする
+    （宛先がディレクトリでないときこの候補が保護パスになることはない）。再帰コピーはその位置の配下も上書きし得るため祖先判定し、
+    元が `.`・`dir/.`・末尾 `/`（中身のコピー）なら宛先自体も祖先判定する。"""
+    if not target:
+        return []
+    out = []
+    for source in sources:
+        if source in (".", "./") or source.endswith(("/.", "/./")) or source.endswith("/"):
+            if recursive:
+                out.append((target[0], True, True))
+        name = os.path.basename(source.rstrip("/"))
+        if name not in ("", ".", ".."):
+            out.append((os.path.join(target[0], name), True, recursive))
+    return out
+
+
 def _git_writes(args):
     """git の作業ツリーを書き換えるサブコマンド（apply・checkout・restore・stash）の基準ディレクトリ。"""
     k, base = 0, None
@@ -1018,7 +1035,11 @@ def _command_writes(argv, text):
             paths = [os.path.basename(pos[0].rstrip("/")) or pos[0]]  # 実行ディレクトリに同名のリンクを作る
         else:
             paths = pos[-1:] if len(pos) >= 2 else []  # cp・ln・install は宛先のみ（読み取り元は対象外）
-        return [(v, True, prog in ("mv", "ln")) for v in paths], []
+        cands = [(v, True, prog in ("mv", "ln")) for v in paths]
+        if prog == "cp":
+            recursive = _cluster_has(args, "rRa") or any(a in ("--recursive", "--archive") for a in args)
+            cands += _copy_destinations(targets[-1:] or pos[-1:], pos if targets else pos[:-1], recursive)
+        return cands, []
     if prog == "chmod":
         pos = [a for a in args if a != "--" and not re.fullmatch(r"-[RfvhHLPcEC]+|--[A-Za-z-]+(=.*)?", a)]
         if not any(a.startswith("--reference") for a in args):
@@ -1032,7 +1053,10 @@ def _command_writes(argv, text):
         values = COPY_VALUE_OPTS["rsync"]
         pos = _positional(args, "".join(o[1] for o in values if len(o) == 2), values)
         # 宛先がリモート（host:path・rsync://）なら対象外
-        return [(pos[-1], True, False)] if len(pos) >= 2 and not re.match(r"[^/]*:", pos[-1]) else [], []
+        if len(pos) < 2 or re.match(r"[^/]*:", pos[-1]):
+            return [], []
+        recursive = _cluster_has(args, "ra") or any(a in ("--recursive", "--archive") for a in args)
+        return [(pos[-1], True, False)] + _copy_destinations(pos[-1:], pos[:-1], recursive), []
     if prog == "curl":
         return [(v, True, False) for v in _option_values(args, "o", ("--output",))], []
     if prog == "wget":
@@ -1332,7 +1356,8 @@ def strip_literal_heredocs(cmd):
                     tail = re.match(r"[^;&|)]*", line[m.end():]).group(0)
                     after = line[m.end() + len(tail):]
                     piped = after.startswith("|") and not after.startswith("||")
-                    data = bool(m.group(2) or m.group(3)) and _heredoc_is_data(
+                    # プロセス置換（>(…)・<(…)）がある行は出力が別コマンドに渡り得るためデータ扱いしない
+                    data = bool(m.group(2) or m.group(3)) and not re.search(r"[<>]\(", line) and _heredoc_is_data(
                         line[start:k] + " " + tail, piped, [e[2] for e in stack])
                     found.append((m.group(1) == "-", m.group(2) or m.group(3) or m.group(4), data))
                     k = m.end()
@@ -1393,18 +1418,10 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     seen_find = False
     safe_finds = True
     cwd_known = True
-    # 長すぎる入力は正規表現の判定前に確認へ回す（C 実装の検索中は期限切れで止められず、hook timeout で未判定実行になる）
-    if len(cmd) > BASH_MAX_CHARS:
-        return ("ask", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）ため確認が必要")
-    # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
-    # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
-    write_hit = None
-    if depth == 0:
-        write_hit = scan_writes(cmd, write_state or WriteState([cwd] if cwd else []))
-    cwd = cwd or os.getcwd()
     if depth > 4:
         return ("ask", "シェルの入れ子が深すぎるため確認が必要")
 
+    # ここから長さ上限の判定までは、入力長に対して線形時間の判定だけを置く（長い入力でも deny を返すため）。
     # 認証情報ファイルの読み取り禁止
     if SECRET_WORDS.search(cmd):
         return ("deny", "認証情報ファイルへのアクセスは禁止")
@@ -1417,6 +1434,16 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     for pat in DEPLOY_PATTERNS:
         if ordered_search(pat, cmd):
             return ("deny", "AWS へのデプロイ/削除系コマンドは禁止。デプロイはユーザーが実行する")
+    # 長すぎる入力は以降の判定前に確認へ回す（C 実装の正規表現は期限切れで止められず、hook timeout で未判定実行になる。
+    # 以降の処理は入力長に比例して重い）
+    if len(cmd) > BASH_MAX_CHARS:
+        return ("ask", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）ため確認が必要")
+    # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
+    # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
+    write_hit = None
+    if depth == 0:
+        write_hit = scan_writes(cmd, write_state or WriteState([cwd] if cwd else []))
+    cwd = cwd or os.getcwd()
     r = check_harness_exec(cmd, cwd)
     if r == "allow":
         return None
