@@ -190,6 +190,7 @@ python3 tools/privacy_check.py --all
 ## 알려진 한계
 
 - 가드는 **명령 문자열을 검사하는 보조 방어**이며 완전한 셸 파서가 아니다. 설정 문구나 heredoc 안의 `npm run deploy`, `aws …`로 시작하는 줄, 비밀 파일 경로 문자열 같은 무해한 텍스트도 차단될 수 있다. 차단되면 다른 도구·스크립트로 우회하지 말고 문구를 바꾸거나 파일 편집 도구를 쓴다.
+- Bash 쓰기 대상의 상대 경로는 hook 입력의 cwd(명령 안의 `cd` 포함) 기준으로 해석해 보호 경로와 비교한다. 2026-11-19 이전 가드는 절대 경로 문자열만 판정해, 저장소 폴더 안에서 `sed -i … hooks/guard.py`처럼 상대 경로로 쓰면 승인 없이 통과했다. 지금도 변수·명령 치환·스크립트 파일 안의 경로는 판정할 수 없으므로, 하네스 파일은 Bash(sed·리다이렉트·heredoc)가 아니라 Edit/Write 도구로만 수정한다.
 - 스크립트 파일 안에 적힌 삭제·SDK 쓰기 코드는 명령 검사로 잡지 못한다(AWS는 프로필 고정과 읽기 전용 역할이 실제 방어선). `python3 -m install.install --apply`, glob(`install/inst*.py`), 저장소를 통째로 복사한 설치기처럼 이름·위치를 바꾼 실행은 문자열 검사로 막지 못한다. 이 경우에도 `--apply`는 터미널 확인을 요구하지만, `script`·`pty`·`expect` 등으로 의사 터미널을 만들어 확인 문구를 넘기면 이 확인도 우회될 수 있다.
 - `HARNESS_HOME`은 Git 저장소라 `git checkout`·`reset`·`stash`·`pull` 등으로 보호 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`)이 승인 없이 바뀔 수 있고, 가드의 쓰기 판정은 git 명령을 검사하지 않는다. 단 설치된 hook·설정에 반영되려면 사용자가 터미널에서 `install.py --apply`를 실행해야 한다.
 - hook 인터프리터가 사라지면 Claude는 `guard_hook.sh`가 거부를 반환하지만, Codex는 신뢰 절차 때문에 python을 직접 실행하므로 인터프리터 소실·hook 타임아웃 시 가드 없이 실행될 수 있다. Python을 업그레이드하면 install.py를 다시 실행한다.
