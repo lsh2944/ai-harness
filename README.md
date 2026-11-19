@@ -15,7 +15,8 @@ Claude Code와 Codex에 공통으로 쓰는 작업 지침·가드 hook·설정 �
 | `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev`(AWS 모듈) |
 | `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh 보조) |
 | `setup.sh` | 새 컴퓨터 초기 설정(Mac/Linux). 아래 "새 컴퓨터 설정" 참고 |
-| `.githooks/` | 저장소 git hook. `pre-commit`·`commit-msg`(개인정보 검사), `post-merge`(pull 후 반영 알림) |
+| `apply.sh` | 설치본 반영(dry-run 요약 → `install.py --apply`의 `apply` 입력 확인). 아래 "설치본 반영(apply)" 참고 |
+| `.githooks/` | 저장소 git hook. `pre-commit`·`commit-msg`(개인정보 검사), `post-commit`(커밋 후 반영 알림), `post-merge`(pull 후 반영 알림) |
 
 ## 새 컴퓨터 설정(Mac/Linux)
 
@@ -56,7 +57,7 @@ cd ai-harness
 
 1. 이 저장소에만 쓰는 커밋 작성자(`git config --local user.name`·`user.email`)가 없으면 입력받는다. 전역 git 설정은 바꾸지 않는다. 메일은 `<개인 메일>` 또는 GitHub noreply 메일(`<ID>+<GitHub 사용자명>@users.noreply.github.com`)을 쓴다.
 2. `git config --local core.hooksPath .githooks`를 설정한다(다른 값이 이미 있으면 바꿀지 묻는다).
-3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. `extra_protected_paths`에는 이 clone의 `.githooks`·`tools/privacy_check.py`·`tools/harness_setup.py`·`setup.sh` 절대 경로가 들어간다. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
+3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. `extra_protected_paths`에는 이 clone의 `.githooks`·`tools/privacy_check.py`·`tools/harness_setup.py`·`setup.sh`·`apply.sh` 절대 경로가 들어간다. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
 4. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한 뒤 `install.py` dry-run 요약(`SAME`은 생략)을 보여 준다. 변경이 없으면 여기서 끝난다. `--with-aws`는 `config.local.json`에 `aws` 절(object)이 있으면 붙인다. `aws`가 `null` 등 object가 아니거나 `AWS`처럼 대소문자만 다른 키가 있으면 오류로 멈춘다(AWS를 쓰지 않으려면 키를 지운다).
 5. 적용할지 묻고, `y`면 `install.py --apply`를 실행한다. 이어서 install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다.
 
@@ -92,8 +93,9 @@ Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다
   - `git commit --no-verify`로 건너뛸 수 있지만 우회 여부는 사용자가 판단한다.
   - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용. 바이너리가 있으면 종료 코드 1).
 - **commit-msg**: `python3 tools/privacy_check.py --message <파일>`로 커밋 메시지 전체(`#` 주석 줄·`commit -v`의 scissors 아래 포함. `-m`·`-F` 커밋은 cleanup=whitespace라 주석 줄도 본문에 남기 때문)를 같은 패턴으로 검사해 검출 시 막는다. 편집기 템플릿의 주석(예: `commit -v`의 diff)에 검출 값이 있어 막히면 메시지 수정이나 `--no-verify`는 사용자가 판단한다. `Co-Authored-By`의 `noreply@anthropic.com`은 허용. 커밋 작성자(user.email) 정보는 검사하지 않는다.
-- **post-merge**: `git pull`(merge·fast-forward) 후 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 목록과, 사용자가 터미널에서 실행할 install.py dry-run·적용 명령(절대 경로, AWS 모듈 사용 시 `--with-aws`)을 **출력만** 한다. Python·install.py를 실행하지 않는다. `config.local.json`이 없으면 `./setup.sh`, aws 절이 견본 값이면 편집을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
-- 이 hook들과 검사기·`setup.sh`·`tools/harness_setup.py`를 바꾸거나 `core.hooksPath`를 바꾸는 것은 커밋 전에 사용자 확인을 받는다(CLAUDE.md). `setup.sh`가 새로 만드는 `config.local.json`은 이 경로들을 `extra_protected_paths`에 넣어 가드가 수정 시 승인을 요구하게 한다. **이미 `config.local.json`이 있는 컴퓨터**는 clone 절대 경로 기준 `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh`를 `extra_protected_paths`에 직접 추가한 뒤 터미널에서 `install.py ... --apply`를 다시 실행해야 반영된다.
+- **post-commit**: 방금 만든 커밋(최초 커밋은 빈 트리 대비, 병합 커밋은 첫 번째 부모 대비)에서 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 `[ai-harness] 설치본 반영 필요: ./apply.sh` 한 줄을 **출력만** 한다. Python·install.py·apply.sh를 실행하지 않고 항상 종료 코드 0이다(커밋에 영향 없음).
+- **post-merge**: `git pull`(merge·fast-forward) 후 같은 경로가 바뀌었으면 목록과 `./apply.sh` 실행 안내(저장소 밖에서 쓸 절대 경로 포함)를 **출력만** 한다. Python·install.py를 실행하지 않는다. `config.local.json`이 없으면 `./setup.sh`, aws 절이 견본 값이면 편집을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
+- 이 hook들과 검사기·`setup.sh`·`apply.sh`·`tools/harness_setup.py`를 바꾸거나 `core.hooksPath`를 바꾸는 것은 커밋 전에 사용자 확인을 받는다(CLAUDE.md). `setup.sh`가 새로 만드는 `config.local.json`은 이 경로들을 `extra_protected_paths`에 넣어 가드가 수정 시 승인을 요구하게 한다. **이미 `config.local.json`이 있는 컴퓨터**는 clone 절대 경로 기준 `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh`, `<clone>/apply.sh` 중 빠진 것을 `extra_protected_paths`에 직접 추가한 뒤 터미널에서 `./apply.sh`를 실행해야 반영된다(2026-11-19 `apply.sh` 추가 전에 만든 `config.local.json`에는 `apply.sh`가 없다).
 
 ## 설정 작성
 
@@ -145,9 +147,34 @@ python3 install/install.py --config config.local.json [--target ...] [--with-aws
 - Claude는 새 세션에서 hook이 적용된다.
 - 기존 `CLAUDE.md`·`AGENTS.md`에 같은 내용을 손으로 넣어 두었다면 dry-run의 `WARN … possible duplicate`를 보고 중복 부분을 직접 정리한다(자동으로 지우지 않는다).
 
+## 설치본 반영(apply)
+
+Claude·Codex는 이 저장소가 아니라 `~/.claude`·`~/.codex`·`~/.agents`에 설치된 사본을 읽는다. 설치기(`install.py`)가 템플릿 값(`{{PYTHON}}` 등)을 치환하고 `settings.json`·`config.toml`을 병합하므로 단순 복사·링크로는 대신할 수 없다. 또 가드·설정 변경이 사용자 확인 없이 적용되지 않도록 저장소 갱신(commit·pull)과 설치본 반영을 의도적으로 분리해 두었다.
+
+언제 필요한가:
+
+- 필요: `hooks/`·`install/`·`settings/`·`instructions/`·`skills/`·`agents/`·`tools/aws/`가 바뀌었을 때(커밋 후 post-commit, pull 후 post-merge가 알려 준다), `config.local.json`을 바꿨을 때.
+- 불필요: `README.md`·`CLAUDE.md`·`tools/privacy_check.py`·`.githooks/`·`setup.sh`·`apply.sh`·그 밖의 `tools/`(저장소에서 직접 실행하거나 설치 대상이 아님).
+
+사용법(저장소 폴더에서 터미널로 직접 실행. 다른 위치에서는 절대 경로로 실행해도 된다):
+
+```bash
+./apply.sh
+```
+
+1. `config.local.json`이 없으면 `./setup.sh` 안내 후 종료한다. 터미널이 아닌 실행(파이프·AI 도구)·Windows는 안내 후 종료한다.
+2. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한다. 견본 값(placeholder)이면 편집을 안내하고 종료한다. `on`이면 `--with-aws`를 붙인다.
+3. `install.py` dry-run 요약(`SAME` 생략)을 보여 준다. 변경이 없으면 "이미 최신"으로 종료한다.
+4. `install.py --config <절대 경로> [--with-aws] --apply`를 실행한다. install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다(그 밖의 입력은 취소). 인터프리터는 `config.local.json`의 `python`, 없으면 venv가 아닌 Python 3.11 이상이다.
+
+동시 사용 주의:
+
+- 설치는 컴퓨터마다 독립이다. 한 컴퓨터에서 push해도 다른 컴퓨터는 `git pull` 후 `./apply.sh`를 실행할 때까지 이전 버전으로 동작한다.
+- 같은 컴퓨터에서는 Claude Code·Codex를 종료한 뒤 적용한다(실행 중인 앱이 `~/.claude.json` 등을 동시에 쓰면 적용이 중단되거나 경합한다). `apply.sh`는 앱을 감지·종료하지 않고 안내만 한다. `apply.sh`(또는 `install.py --apply`)를 여러 터미널에서 동시에 실행하지 않는다.
+
 ## 갱신
 
-저장소를 갱신(`git pull` 등)한 뒤 같은 명령으로 dry-run → `--apply`를 다시 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부와 실행할 명령을 알려 준다). 변경이 없으면 모든 항목이 `SAME`으로 나온다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
+저장소를 갱신(`git pull` 등)한 뒤 `./apply.sh`를 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부를 알려 준다). 변경이 없으면 "이미 최신"으로 끝난다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
 
 ## 테스트
 
@@ -165,7 +192,7 @@ python3 -m unittest discover -s tools/aws -t tools/aws
 
 `install/tests`는 venv가 아닌 기반 인터프리터로 install.py를 하위 프로세스 실행한다(Python 3.11 이상 필요, `tomllib`).
 
-`tools/tests`에는 `test_privacy_check.py`(개인정보 검사)와 `test_setup.py`(setup.sh·`.githooks`·`harness_setup.py`)도 들어 있다. `test_setup.py`는 작업 트리(Git 제외 파일 제외)를 임시 origin에 복제해 로컬 clone하고 임시 HOME·pty에서 실행하며, `install.py --apply`는 스텁으로만 확인한다. 개별 실행:
+`tools/tests`에는 `test_privacy_check.py`(개인정보 검사)와 `test_setup.py`(setup.sh·apply.sh·`.githooks`·`harness_setup.py`)도 들어 있다. `test_setup.py`는 작업 트리(Git 제외 파일 제외)를 임시 origin에 복제해 로컬 clone하고 임시 HOME·pty에서 실행하며, `install.py --apply`는 스텁으로만 확인한다. 개별 실행:
 
 ```bash
 python3 -m unittest discover -s tools/tests -t tools/tests -p 'test_privacy_check.py'
