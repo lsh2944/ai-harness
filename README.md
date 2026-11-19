@@ -13,9 +13,87 @@ Claude Code와 Codex에 공통으로 쓰는 작업 지침·가드 hook·설정 �
 | `settings/` | 병합 조각. `claude.settings*.json`(권한·자동 모드 규칙·출력 상한 등), `codex.config*.toml`(Codex 기본값·덮어쓸 값·환경변수 제외 목록), `mcp*.json`(MCP 버전 고정·aws-api env) |
 | `agents/` | 공용 서브에이전트 `code-reviewer`·`architect`·`troubleshooter`·`script-feature`와 영역별 구현 에이전트 견본 `feature-template.md` |
 | `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev`(AWS 모듈) |
-| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈) |
+| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh·post-merge 보조) |
+| `setup.sh` | 새 컴퓨터 초기 설정(Mac/Linux). 아래 "새 컴퓨터 설정" 참고 |
+| `.githooks/` | 저장소 git hook. `pre-commit`(개인정보 검사), `post-merge`(pull 후 반영 알림) |
+
+## 새 컴퓨터 설정(Mac/Linux)
+
+Windows는 아직 지원하지 않는다(`setup.sh`가 MINGW/MSYS/CYGWIN을 감지하면 안내 후 종료). git은 clone할 때 저장소의 스크립트를 실행하지 않으므로 clone만으로 자동 설치되지는 않는다. clone 후 `./setup.sh`를 한 번 실행한다.
+
+### ① Git·Python 준비
+
+- macOS: `xcode-select --install`(Command Line Tools) 또는 Homebrew로 Git을 설치한다. Linux: 배포판 패키지 관리자로 설치한다.
+- `install.py`는 Python 3.11 이상(`tomllib`)이 필요하다. hook용 인터프리터는 venv가 아닌 시스템 Python이어야 한다(`setup.sh`가 PATH와 흔한 설치 위치에서 찾아 제안한다).
+
+### ② GitHub fine-grained token 만들기
+
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → **Generate new token**.
+2. Token name을 정하고 **Expiration(만료일)** 을 설정한다. 만료되면 새 토큰을 만들어 아래 "토큰 교체"대로 바꾼다.
+3. **Resource owner**: 본인 계정. **Repository access**: "Only select repositories"에서 이 저장소(필요하면 다른 개인 저장소도)를 고른다.
+4. **Repository permissions**: **Contents → Read and write**. Metadata는 자동으로 Read-only가 붙는다.
+5. 생성 직후 한 번만 보이는 토큰 값을 복사한다. 토큰은 저장소 파일·`config.local.json`·git 설정에 넣지 않는다.
+
+### ③ clone과 인증 저장
+
+```bash
+git clone https://github.com/<GitHub 사용자명>/ai-harness.git
+```
+
+- 프롬프트의 `Username`에는 GitHub 사용자명, `Password`에는 ②의 토큰을 붙여 넣는다(입력해도 화면에 표시되지 않는다).
+- macOS: Command Line Tools·Homebrew의 Git은 보통 credential helper `osxkeychain`이 설정되어 있어 토큰이 키체인에 저장되고 다음부터 묻지 않는다. `git config --get credential.helper`로 확인한다.
+- Linux: credential helper가 설정되어 있지 않으면 fetch·push마다 다시 묻는다. 쓸 수 있는 helper(libsecret, Git Credential Manager, 메모리에만 잠시 두는 `cache` 등)는 배포판·데스크톱 환경에 따라 다르다. `store`는 토큰을 홈의 파일에 평문으로 저장하므로 권장하지 않는다.
+
+### ④ `./setup.sh`
+
+clone한 폴더에서 터미널로 직접 실행한다(파이프·AI 도구 등 비대화 실행은 거부). 다시 실행해도 안전하며 끝난 단계는 건너뛴다.
+
+```bash
+cd ai-harness
+./setup.sh            # 끝까지(적용 여부는 마지막에 묻는다)
+./setup.sh --no-apply # dry-run 요약까지만
+```
+
+1. 이 저장소에만 쓰는 커밋 작성자(`git config --local user.name`·`user.email`)가 없으면 입력받는다. 전역 git 설정은 바꾸지 않는다. 메일은 `<개인 메일>` 또는 GitHub noreply 메일(`<ID>+<GitHub 사용자명>@users.noreply.github.com`)을 쓴다.
+2. `git config --local core.hooksPath .githooks`를 설정한다(다른 값이 이미 있으면 바꿀지 묻는다).
+3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
+4. `install.py` dry-run 요약(`SAME`은 생략)을 보여 준다. 변경이 없으면 여기서 끝난다. `--with-aws`는 `config.local.json`에 `aws` 절이 있으면 붙인다.
+5. 적용할지 묻고, `y`면 `install.py --apply`를 실행한다. 이어서 install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다.
+
+### ⑤ 이후 커밋·push
+
+- 커밋하면 pre-commit hook이 개인정보 검사를 실행한다(아래 "git hook").
+- `git push origin main`은 저장된 토큰으로 인증된다.
+
+### 문제 해결(인증)
+
+| 증상 | 원인 | 대처 |
+|---|---|---|
+| 403 `Write access to repository not granted` | 토큰에 이 저장소 또는 Contents 쓰기 권한이 없음, 또는 키체인에 다른 토큰이 저장되어 있음 | ②의 Repository access·Contents 권한을 확인하거나 새 토큰을 만들고 아래대로 교체 |
+| 401 / `Invalid username or token` | 토큰 만료·오입력 | 새 토큰을 만들어 교체 |
+
+토큰 교체(macOS 키체인): 저장된 항목을 지운 뒤 다시 fetch·push하면 Username·Password(새 토큰)를 다시 묻는다.
+
+```bash
+printf 'protocol=https\nhost=github.com\n\n' | git credential-osxkeychain erase
+git push origin main
+```
+
+Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다름).
+
+## git hook(`.githooks/`)
+
+`setup.sh`가 `core.hooksPath`를 설정한 저장소에서만 동작한다. 수동 설정: `git config --local core.hooksPath .githooks`.
+
+- **pre-commit**: `python3 tools/privacy_check.py --staged`로 index의 추가·수정 파일을 검사한다. 12자리 AWS 계정 ID·IAM ARN·이메일·AWS 액세스 키·GitHub 토큰·`sk-` 키·PRIVATE KEY 헤더·`/Users/<이름>/`·`/home/<이름>/` 경로·현재 사용자의 HOME 경로와 `privacy_words`를 찾으면 `파일:행: 종류(값 일부 마스킹)`를 출력하고 커밋을 막는다. 바이너리·1MiB 초과 파일은 `SKIP`으로 표시하고 건너뛴다. 커밋 메시지·작성자 정보는 검사하지 않는다.
+  - 오탐이면 `tools/privacy_check.py`의 패턴·허용 목록을 고친다(허용 목록은 최소한으로 두고 근거를 주석으로 남긴다). 테스트용 값은 소스에 그대로 쓰지 말고 실행 시 문자열을 이어 붙여 만든다.
+  - `git commit --no-verify`로 건너뛸 수 있지만 우회 여부는 사용자가 판단한다.
+  - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용).
+- **post-merge**: `git pull`(merge·fast-forward) 후 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 목록을 알리고, `config.local.json`이 있으면 그 `python`(없으면 `python3`)으로 install.py dry-run 요약과 적용 명령을 보여 준다. 적용은 하지 않는다. `config.local.json`이 없으면 `./setup.sh` 실행을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
 
 ## 설정 작성
+
+`setup.sh`가 만들지 않은 경우 견본을 복사해 편집한다.
 
 ```bash
 cp config.example.json config.local.json
@@ -34,6 +112,7 @@ cp config.example.json config.local.json
 | `aws.assume_role_cmd` | `{{ASSUME_ROLE_CMD}}` | 인증 갱신 스크립트 절대 경로. 예: `tools/aws/assume_role.sh` |
 | `aws.assume_role_envs` | `{{AWS_ENVS}}`(쉼표 목록) | 가드가 `--awsEnv <이름>` 실행을 허용할 환경 이름 |
 | `aws.roles`, `aws.mfa_serial` | — | `tools/aws/assume_role.py`가 쓰는 환경별 역할 ARN과 MFA 장치 ARN |
+| `privacy_words` | — | 선택. pre-commit 개인정보 검사에 더할 사용자별 단어 목록(실명·회사 도메인 등, 대소문자 무시). install.py는 이 키를 쓰지 않는다 |
 
 install.py가 내부에서 계산하는 변수: `{{SKILL_DIR}}`(설치된 각 스킬 폴더), `{{AWS_MCP_TOOLS}}`(`--with-aws`면 에이전트 tools에 aws-api MCP 도구를 붙이고 아니면 빈 문자열). 마크다운의 `<!-- BEGIN aws -->`~`<!-- END aws -->` 블록은 `--with-aws`일 때만 남는다. 치환되지 않은 `{{...}}`가 남으면 설치를 중단한다.
 
@@ -64,7 +143,7 @@ python3 install/install.py --config config.local.json [--target ...] [--with-aws
 
 ## 갱신
 
-저장소를 갱신(`git pull` 등)한 뒤 같은 명령으로 dry-run → `--apply`를 다시 실행한다. 변경이 없으면 모든 항목이 `SAME`으로 나온다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
+저장소를 갱신(`git pull` 등)한 뒤 같은 명령으로 dry-run → `--apply`를 다시 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부와 dry-run 요약을 알려 준다). 변경이 없으면 모든 항목이 `SAME`으로 나온다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
 
 ## 테스트
 
@@ -81,6 +160,14 @@ python3 -m unittest discover -s tools/aws -t tools/aws
 ```
 
 `install/tests`는 venv가 아닌 기반 인터프리터로 install.py를 하위 프로세스 실행한다(Python 3.11 이상 필요, `tomllib`).
+
+`tools/tests`에는 `test_privacy_check.py`(개인정보 검사)와 `test_setup.py`(setup.sh·`.githooks`·`harness_setup.py`)도 들어 있다. `test_setup.py`는 작업 트리(Git 제외 파일 제외)를 임시 origin에 복제해 로컬 clone하고 임시 HOME·pty에서 실행하며, `install.py --apply`는 스텁으로만 확인한다. 개별 실행:
+
+```bash
+python3 -m unittest discover -s tools/tests -t tools/tests -p 'test_privacy_check.py'
+python3 -m unittest discover -s tools/tests -t tools/tests -p 'test_setup.py'
+python3 tools/privacy_check.py --all
+```
 
 ## 가드 동작 요약
 
