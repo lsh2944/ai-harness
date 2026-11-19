@@ -18,7 +18,8 @@ if [ "$status" -ne 0 ]; then
         echo "[pre-commit] 개인정보 검사가 오류로 끝나 커밋을 중단했습니다." >&2
     fi
     echo "  - 실제 값이면 파일에서 지우거나 자리표시자로 바꾼 뒤 다시 git add 하세요." >&2
-    echo "  - 오탐이면 tools/privacy_check.py의 패턴·허용 목록을 고쳐서 함께 커밋하세요." >&2
+    echo "  - 바이너리 등 검사할 수 없는 파일(SKIP)도 차단합니다. 내용을 확인한 뒤 판단하세요." >&2
+    echo "  - 오탐이면 사용자 확인을 받은 뒤 tools/privacy_check.py의 패턴·허용 목록을 고쳐 커밋합니다." >&2
     echo "  - git commit --no-verify 로 검사를 건너뛸 수 있지만, 우회 여부는 사용자가 직접 판단합니다." >&2
     exit 1
 fi

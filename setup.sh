@@ -168,7 +168,9 @@ else
         --response-language "$lang" --comment-language "$comment" || exit 1
 fi
 
+# aws 節の状態を表示してから進む（キーの誤記・null は helper がエラーにする）
 aws=$(helper aws-mode) || exit 1
+echo "      AWS 모듈(--with-aws): $aws"
 if [ "$aws" = "placeholder" ]; then
     echo
     echo "config.local.json 의 aws.roles 또는 aws.mfa_serial 이 아직 견본 값입니다."

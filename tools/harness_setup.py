@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""setup.sh と .githooks/post-merge の補助（標準ライブラリのみ、Python 3.8 以上で動く）。
+"""setup.sh の補助（標準ライブラリのみ、Python 3.8 以上で動く）。git hook からは使わない。
 
 サブコマンド（cwd はリポジトリのどこでもよい。パスはリポジトリ直下からの相対で解決する）:
   system-python                 venv ではない Python 3.11 以上（tomllib あり）を探して表示。なければ終了コード 1
   example-field KEY             config.example.json の最上位キーの値を表示（言語の既定値用）
-  write-config ...              config.local.json を新規作成（既存なら上書きせず終了コード 1、権限 0600）
-  aws-mode                      config.local.json の aws 節: off / on / placeholder（見本の値のまま）
+  write-config ...              config.local.json を新規作成（既存なら上書きせず終了コード 1、権限 0600）。
+                                extra_protected_paths に .githooks 等（PROTECTED_DEFAULTS）の絶対パスを入れる
+  aws-mode                      config.local.json の aws 節: off / on / placeholder（見本の値のまま）。
+                                aws が object でない・大文字小文字違いのキーはエラー
   python-of                     install.py を動かすインタプリタ（設定の python、なければ PATH の python3）
-  apply-command                 利用者が端末で実行する --apply コマンドを表示（実行はしない）
+  apply-command                 利用者が端末で実行する --apply コマンドを表示（実行はしない。placeholder なら終了コード 1）
   dry-run                       install.py の dry-run を実行して要約を表示（書き込みなし）
                                 終了コード: 0=変更予定あり, 3=変更なし, 1=エラー
 """
@@ -31,6 +33,10 @@ PROBE_TIMEOUT = 10
 FIXED_CANDIDATES = ('/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3')
 # venv ではなく、install.py が必要とする tomllib（3.11 以上）を持つかを確かめる
 PROBE = 'import sys, tomllib; sys.exit(0 if sys.prefix == sys.base_prefix else 1)'
+# 新規作成する config.local.json の extra_protected_paths に足す（clone 内の相対パス）
+PROTECTED_DEFAULTS = ('.githooks', 'tools/privacy_check.py', 'tools/harness_setup.py', 'setup.sh')
+PLACEHOLDER_HELP = ('config.local.json 의 aws.roles 또는 aws.mfa_serial 이 아직 견본 값입니다. '
+                    '실제 값으로 편집한 뒤 ./setup.sh 를 다시 실행하세요.')
 SUMMARY_LINE = re.compile(r'^DRY-RUN: (\d+) file\(s\) would change')
 
 
@@ -85,9 +91,15 @@ def system_python():
 
 
 def aws_mode(data):
-    section = data.get('aws')
-    if not isinstance(section, dict):
+    """aws 節の状態。キーがなければ off。キーはあるが object でない（null 等）・大文字小文字違いのキーはエラー。"""
+    variants = [k for k in data if isinstance(k, str) and k.strip().lower() == 'aws' and k != 'aws']
+    if variants:
+        raise SystemExit(f'ERROR: {CONFIG}: unexpected key {variants[0]!r} (did you mean "aws"?)')
+    if 'aws' not in data:
         return 'off'
+    section = data['aws']
+    if not isinstance(section, dict):
+        raise SystemExit(f'ERROR: {CONFIG}: "aws" must be an object (remove the key to disable the AWS module)')
     example = load_json(ROOT / EXAMPLE).get('aws') or {}
     if section.get('roles') == example.get('roles') or section.get('mfa_serial') == example.get('mfa_serial'):
         return 'placeholder'
@@ -113,6 +125,11 @@ def install_args(data):
     return args
 
 
+def protected_defaults():
+    # 個人情報検査・git hook・初期設定の仕組みを AI が承認なしに弱められないよう、ガードの追加保護パスに入れる（clone の絶対パス）
+    return [str(ROOT / name) for name in PROTECTED_DEFAULTS]
+
+
 def cmd_write_config(args):
     path = config_path()
     example = load_json(ROOT / EXAMPLE)
@@ -122,7 +139,7 @@ def cmd_write_config(args):
         'python': args.python or None,
         'response_language': args.response_language,
         'comment_language': args.comment_language,
-        'extra_protected_paths': example.get('extra_protected_paths', []),
+        'extra_protected_paths': list(example.get('extra_protected_paths', [])) + protected_defaults(),
     }
     if args.aws:
         section = dict(example.get('aws') or {})
@@ -214,6 +231,10 @@ def main(argv=None):
     elif args.command == 'python-of':
         print(python_of(data))
     else:
+        if aws_mode(data) == 'placeholder':
+            # 見本の値のまま適用させない（setup.sh と同じく編集を案内する）
+            print(PLACEHOLDER_HELP, file=sys.stderr)
+            return 1
         print(' '.join(shlex.quote(a) for a in [python_of(data), *install_args(data), '--apply']))
     return 0
 

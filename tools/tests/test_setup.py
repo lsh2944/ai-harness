@@ -153,6 +153,10 @@ class SetupScriptTests(Fixture):
         self.assertEqual(config['python'], str(self.bin / 'python3'))
         self.assertEqual((config['response_language'], config['comment_language']), ('Korean', 'Japanese'))
         self.assertNotIn('aws', config)
+        root = self.clone.resolve()
+        self.assertEqual(config['extra_protected_paths'], [str(root / '.githooks'), str(root / 'tools/privacy_check.py'),
+                                                           str(root / 'tools/harness_setup.py'), str(root / 'setup.sh')])
+        self.assertIn('AWS 모듈(--with-aws): off', out)
         self.assertIn('DRY-RUN:', out)
         self.assertIn('--no-apply', out)
         self.assertNotIn('SAME ', out)
@@ -302,21 +306,89 @@ class GitHookTests(Fixture):
         result = self.git(self.clone, 'pull', '-q', '--ff-only')
         return result.stdout + result.stderr
 
+    def test_pre_commit_special_contents_and_names(self):
+        cases = {
+            'wide.txt': ('key ' + FAKE_ACCOUNT + '\n').encode('utf-16'),  # BOM 付き UTF-16
+            'big.txt': (('x' * 200 + '\n') * 8000 + 'id ' + FAKE_ACCOUNT + '\n').encode(),  # 1MiB 超
+            'we[ir]d *name.txt': ('id ' + FAKE_ACCOUNT + '\n').encode(),
+        }
+        for name, data in cases.items():
+            with self.subTest(name=name):
+                (self.clone / name).write_bytes(data)
+                self.git(self.clone, 'add', '--', name)
+                result = self.commit(self.clone)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'{name}:', result.stdout + result.stderr)
+                self.git(self.clone, 'rm', '-q', '--cached', '--', name)
+                (self.clone / name).unlink()
+        # 通常ファイル → 中身に個人情報を含むシンボリックリンクへの型変更
+        (self.clone / 'link').write_text('plain\n')
+        self.git(self.clone, 'add', 'link')
+        self.assertEqual(self.commit(self.clone).returncode, 0)
+        (self.clone / 'link').unlink()
+        os.symlink('/Users/' + 'alice' + '/secret', self.clone / 'link')
+        self.git(self.clone, 'add', 'link')
+        result = self.commit(self.clone)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('link:1: home path', result.stdout + result.stderr)
+
+    def test_pre_commit_blocks_binary(self):
+        (self.clone / 'blob.bin').write_bytes(b'\x00\x01\x02')
+        self.git(self.clone, 'add', 'blob.bin')
+        result = self.commit(self.clone)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('SKIP blob.bin: binary', result.stdout + result.stderr)
+
+    def test_commit_msg_blocks_personal_data_but_allows_coauthor(self):
+        (self.clone / 'a.txt').write_text('ok\n')
+        self.git(self.clone, 'add', 'a.txt')
+        result = self.commit(self.clone, 'feat: x\n\nmail ' + 'bob' + '@' + 'corp-sample.co.jp\n')
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertIn('<commit message>:3: email', output)
+        self.assertIn('[commit-msg]', output)
+        result = self.commit(self.clone, 'feat: x\n\nCo-Authored-By: Claude <noreply' + '@anthropic.com>\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def poison_python(self):
+        """PATH の python3 を、呼ばれたら印を残すだけの偽物にする（post-merge が Python を呼ばないことの確認用）。"""
+        fake = self.base / 'poison'
+        fake.mkdir()
+        self.python_called = self.base / 'python-called'
+        script = f'#!/bin/sh\ntouch "{self.python_called}"\nexit 1\n'
+        for name in ('python3', 'python'):
+            (fake / name).write_text(script)
+            (fake / name).chmod(0o755)
+        self.env['PATH'] = f'{fake}:{self.env["PATH"]}'
+
     def test_post_merge_without_config_suggests_setup(self):
+        self.poison_python()
         self.origin_commit('skills/new-skill/SKILL.md', 'x\n')
         out = self.pull()
         self.assertIn('skills/new-skill/SKILL.md', out)
         self.assertIn('./setup.sh', out)
+        self.assertFalse(self.python_called.exists())
 
-    @unittest.skipUnless(HAS_TOMLLIB, 'install.py dry-run needs Python 3.11+')
-    def test_post_merge_with_config_shows_dry_run_and_apply_command(self):
+    def test_post_merge_with_config_only_prints_commands(self):
         self.write_config()
+        self.poison_python()
         self.origin_commit('instructions/core.md', 'changed\n')
         out = self.pull()
+        self.assertFalse(self.python_called.exists(), 'post-merge must not run Python')
         self.assertIn('instructions/core.md', out)
-        self.assertIn('DRY-RUN:', out)
-        self.assertIn('--apply', out)
+        root = str(self.clone.resolve())
+        self.assertIn(f"'{root}/install/install.py' --config '{root}/config.local.json' --apply", out)
+        self.assertIn('--with-aws', out)
+        self.assertNotIn('DRY-RUN:', out)
         self.assertFalse((self.home / '.claude').exists(), 'post-merge must not write HOME')
+
+    def test_post_merge_with_placeholder_aws_asks_for_edit(self):
+        example = json.loads((self.clone / 'config.example.json').read_text())
+        self.write_config(aws=example['aws'])
+        self.origin_commit('agents/x.md', 'x\n')
+        out = self.pull()
+        self.assertIn('견본 값', out)
+        self.assertNotIn('--apply', out)
 
     def test_post_merge_ignores_unrelated_changes(self):
         self.origin_commit('README.md', 'docs only\n')
@@ -344,6 +416,21 @@ class HelperTests(Fixture):
         self.write_config(aws={'roles': {'DEV': 'r'}, 'mfa_serial': 'm'})
         self.assertEqual(self.helper('aws-mode').stdout.strip(), 'on')
         self.assertIn('--with-aws', self.helper('apply-command').stdout)
+
+    def test_aws_mode_errors_and_placeholder_apply_command(self):
+        for extra in ({'aws': None}, {'aws': 'yes'}, {'AWS': {'roles': {}}}):
+            with self.subTest(extra=extra):
+                self.write_config(**extra)
+                result = self.helper('aws-mode')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('ERROR', result.stderr)
+        example = json.loads((self.clone / 'config.example.json').read_text())
+        self.write_config(aws=example['aws'])
+        self.assertEqual(self.helper('aws-mode').stdout.strip(), 'placeholder')
+        result = self.helper('apply-command')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('견본 값', result.stderr)
 
     def test_dry_run_without_config_fails(self):
         result = self.helper('dry-run')
