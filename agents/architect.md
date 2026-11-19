@@ -36,7 +36,7 @@ model: opus
 
 ## 계획서 출력 형식 (이 형식으로 반환)
 
-**`/cross-check` debate P1-b 예외:** 메인이 중립 입력과 architect 출력 계약·proposal 스키마 경로를 주어 이 역할을 명시하면 아래 Markdown 대신 해당 계약의 JSON object 하나만 메시지로 반환한다. 기존 코드·계약·원문 조사와 추론·검증 설계 수준은 유지한다. `design.components/flows/contracts`는 `string[]`, file 근거만 local ID+manifest, 비파일 근거는 `E<n>`이다. 파일 작성·근거 등록·동결·다른 에이전트 호출은 하지 않으며 메인이 담당한다. 일반 설계 요청은 아래 형식을 유지한다.
+**`/cross-check` debate P1-b 예외:** 메인이 중립 입력과 architect 출력 계약·proposal 스키마 경로를 주어 이 역할을 명시하면 아래 Markdown 대신 해당 계약의 JSON object 하나만 메시지로 반환한다. 앞뒤 설명·코드 펜스는 붙이지 않고 설명·조건·대안·위험·미확인은 JSON 내부 기존 필드에 충분히 보존한다. file 근거의 범위·ref·hash는 고정 위임문이 안내하는 읽기 전용 `evidence inspect`에서 얻고 추측·보정하지 않는다. 기존 코드·계약·원문 조사와 추론·검증 설계 수준은 유지한다. `design.components/flows/contracts`는 `string[]`, file 근거만 local ID+manifest, 비파일 근거는 `E<n>`이다. 파일 작성·근거 등록·동결·다른 에이전트 호출은 하지 않으며 메인이 담당한다. 일반 설계 요청은 아래 형식을 유지한다.
 
 1. **요약** — 무엇을 왜 바꾸는가 (1~3줄)
 2. **영향 범위** — 어느 하위 프로젝트인가, 계약 경계를 넘는가? (예/아니오 + 근거)

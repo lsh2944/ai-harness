@@ -8,6 +8,14 @@ P1-b 위임은 `investigation-ready --architect-prompt`가 반환한 **고정 ar
 - v2 관찰문은 **proposal.evidence[].observation에 한 번만 작성**한다. manifest에는 observation 필드를 넣지 않는다. runner가 해당 local key의 동일 원문을 등록 정보에 그대로 연결한다. proposal의 필수 observation은 생략할 수 없다.
 - local 키는 file evidence의 `id`와 manifest의 `key`에만 쓴다. 자유 문장·ref에서는 실제 파일/입력 경로와 줄 범위를 쓴다. `source_state`와 현재 전체 파일 SHA256은 실제 조사한 값이다. 아래 경로·hash·관찰 내용은 형식 예시이며 그대로 제출하지 않는다.
 
+## 줄 범위·hash 확인 (architect, 읽기 전용)
+
+고정 위임문의 `evidence_inspect` 명령 배열 뒤에 `--file <절대경로>`와 `--lines <a-b>` 또는 `--whole-file` 중 하나를 붙여 실행한다. 일반 원문 읽기·수동 줄 세기·별도 hash 조회를 이 검사로 대체할 수 있으며, 호출부·계약 양쪽 등 필요한 추가 조사는 그대로 한다. Codex 최초 조사 완료·동결 입력·비공개 결과 무결성 검사를 같은 세션 잠금 안에서 통과해야 한다. 근거 등록·ID 발급·파일 작성·세션 변경·AI 호출은 하지 않는다.
+
+반환 `line_count`, `lines`, `ref`, `file_sha256`, `numbered_source`는 같은 bytes에서 산출된다. manifest의 `path/lines/file_sha256`와 proposal의 `ref`에 반환값을 그대로 쓴다. 원문 내용·관찰·추론·작업트리 상태는 architect가 직접 확인한다. `[1,5]`를 4줄 파일에 요청하면 거부하며 `[1,4]`로 자동 보정하지 않는다. 마지막 개행은 빈 줄 하나를 추가하지 않는다. 빈 파일의 whole-file 응답은 `line_count:0`, `lines:null`, `ref:null`이며 유효한 file 줄 인용으로 제출할 수 없다. 그 사실이 설계 판단에 필요하면 기존 설명·미확인 필드에 남기고, 근거 없이 다른 파일/추론으로 위장하지 않는다. 크기·보호 경로·심볼릭 링크 검사는 기존과 같고, 검사 뒤 파일 변경은 prepare의 현재 hash·원문 재검사로 거부된다.
+
+설계·조건·대안·위험·미확인·추가 설명은 JSON 내부의 기존 필드에 충분히 담는다. 최종 응답은 JSON object 하나이며, 그 앞뒤에 결론 요약·인사·설명·코드 펜스를 붙이지 않는다. 형식을 맞추기 위해 의미 있는 내용을 생략하지 않는다.
+
 ```json
 {
   "handoff_version": 2,
@@ -50,7 +58,7 @@ P1-b 위임은 `investigation-ready --architect-prompt`가 반환한 **고정 ar
 
 ## 메인의 복사·오류 처리
 
-메인은 응답 JSON을 최초 별도 파일로 저장할 때 **값·항목·순서를 그대로 복사**한다. JSON 직렬화의 들여쓰기·key 순서는 달라도 되지만 문자열 내부의 공백·개행·근거·조건·위험·대안·미확인은 바꾸지 않는다. 이후 원본 파일은 편집·삭제하지 않는다. `proposal prepare`가 허용하는 변환은 선언된 file evidence ID의 기계 연결뿐이다.
+메인은 architect **최종 응답 텍스트 전체를 그대로 한 번 저장**한다. 실제 응답 앞뒤 설명·코드 펜스·공백도 포함하며 JSON 부분만 추출하거나 다시 직렬화하지 않는다. 도구의 transport metadata는 응답 본문이 아니므로 포함하지 않는다. 이후 원본 파일은 편집·삭제하지 않는다. strict JSON parser는 앞뒤 설명·펜스가 있으면 등록 전에 거부한다. 메인은 원문과 오류를 보존하고 중단·보고하며, 설명을 버리거나 JSON 내부로 옮기거나 새 architect를 자동 호출하지 않는다. JSON만 생성하도록 도구 수준에서 강제하거나 최초 저장이 실제 응답과 같은지 자동 인증하는 기능은 아니다. `proposal prepare`가 허용하는 변환은 선언된 file evidence ID의 기계 연결뿐이다. runner가 만드는 prepared JSON의 들여쓰기·key 순서는 달라도 되지만 값·항목·배열 순서·문자열 내부의 공백·개행·근거·조건·위험·대안·미확인은 바꾸지 않는다.
 
 메인은 `init` 반환 `project_root`를 기준으로 고유 초안 디렉터리를 먼저 준비하고, `proposal prepare --file`과 `--out` 모두 그 안의 **절대경로**로 전달한다. 상대경로를 제출해 본 뒤 다시 호출하는 방식은 사용하지 않는다. prepare 입력은 최초 원문 저장 파일이며 scaffold 응답이나 메인 재작성본으로 바꾸지 않는다.
 

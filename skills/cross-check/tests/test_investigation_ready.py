@@ -73,6 +73,12 @@ class InvestigationReadyTests(unittest.TestCase):
                 self.assertIn(str(co.SCHEMAS / 'proposal.schema.json'), prompt)
                 self.assertIn(str(co.HERE.parent / 'references/architect-handoff.md'), prompt)
                 self.assertEqual(prompt, co.neutral_architect_prompt(result))
+                metadata, _ = json.JSONDecoder().raw_decode(prompt.split('\n', 1)[1])
+                command = metadata['evidence_inspect']
+                self.assertEqual(command, ['python3', str(co.HERE / 'co_design.py'), 'evidence', 'inspect', '--session', sid])
+                parsed = co.parser().parse_args(command[2:] + ['--file', str(self.env.project / 'src/app.py'), '--whole-file'])
+                self.assertEqual((parsed.session, parsed.action, parsed.whole_file), (sid, 'inspect', True))
+                self.assertIn('최종 응답 전체가 JSON', prompt)
                 actual_sources = {str(self.env.project / 'src/app.py'), str(self.env.project / 'src/other.py')}
                 self.assertFalse(actual_sources & {str(c.args[0]) for c in reads.call_args_list})
 

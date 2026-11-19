@@ -2902,6 +2902,11 @@ def cmd_freeze_inputs(args):
 def capture_evidence(value, first, last):
     """根拠の読み取りと抜粋だけを行う。登録・ID 割当・保存はしない。"""
     data, _, resolved = read_source(value, MAX_SOURCE)
+    return capture_snapshot(data, resolved, first, last)
+
+
+def capture_snapshot(data, resolved, first, last):
+    """同じ bytes から範囲・抜粋・全体 hash を求める。範囲は補正しない。"""
     lines = data.splitlines(keepends=True)
     if not 1 <= first <= last <= len(lines):
         raise Refused('line range outside the file')
@@ -2910,6 +2915,37 @@ def capture_evidence(value, first, last):
         raise Refused('captured range exceeds 256 KiB; narrow it')
     return captured, {'path': str(resolved), 'lines': [first, last], 'sha256': sha256(captured),
                       'file_sha256': sha256(data), 'bytes': len(captured)}
+
+
+def cmd_evidence_inspect(args):
+    """開始条件を満たした独立調査用。登録・保存・ID 割当は一切しない。"""
+    sid = sid_check(args.session)
+    with investigation_session(sid):
+        path = Path(args.file)
+        if not path.is_absolute() or not _within(path.resolve(strict=True), PROJECT):
+            raise Refused('inspection requires an absolute source path inside the current project')
+        data, _, resolved = read_source(path, MAX_SOURCE)
+        lines = data.splitlines(keepends=True)
+        if args.whole_file:
+            first, last = 1, len(lines)
+        else:
+            match = re.fullmatch(r'(\d+)-(\d+)', args.lines)
+            if not match:
+                raise Refused('--lines must be a-b')
+            first, last = map(int, match.groups())
+        if args.whole_file and not lines:
+            # 空ファイルに有効な行範囲を捏造しない。file evidence としては登録できない。
+            return {'status': 'ok', 'path': str(resolved), 'line_count': 0, 'lines': None, 'ref': None,
+                    'file_sha256': sha256(data), 'sha256': sha256(b''), 'bytes': 0, 'numbered_source': ''}, 0
+        _, entry = capture_snapshot(data, resolved, first, last)
+        try:
+            numbered = ''.join(str(number) + '\t' + line.decode('utf-8')
+                               for number, line in enumerate(lines[first - 1:last], first))
+        except UnicodeError:
+            raise Refused('source excerpt must be UTF-8; do not replace invalid bytes') from None
+        suffix = ':L' + str(first) + ('-L' + str(last) if last != first else '')
+        return {'status': 'ok', **entry, 'line_count': len(lines),
+                'ref': str(resolved.relative_to(PROJECT.resolve())) + suffix, 'numbered_source': numbered}, 0
 
 
 def evidence_ids_reserved(session, extra=()):
@@ -4313,7 +4349,9 @@ def neutral_architect_prompt(output):
     """検証済み中立パスだけを固定文へ渡す。自由文・提案・実装例は受け取らない。"""
     metadata = {'inputs': output['inputs'], 'data': output['data'],
                 'output_contract': str(HERE.parent / 'references/architect-handoff.md'),
-                'proposal_schema': str(SCHEMAS / 'proposal.schema.json')}
+                'proposal_schema': str(SCHEMAS / 'proposal.schema.json'),
+                'evidence_inspect': ['python3', str(HERE / 'co_design.py'), 'evidence', 'inspect',
+                                     '--session', output['session']]}
     return (
         '당신은 /cross-check debate P1-b의 독립 architect입니다. 다음은 중립 입력과 출력 계약의 경로·hash 메타데이터뿐입니다. '
         '메인의 사전 조사·제안이나 Codex 출력은 전달하지 않습니다.\n'
@@ -4321,16 +4359,21 @@ def neutral_architect_prompt(output):
         '입력 3종과 선택 data를 직접 읽고 scope 허용 범위에서 현행 코드·호출부·계약 양쪽·근거 원문을 충실히 조사하세요. '
         '요구사항 매핑·설계 전문·대안과 조건·위험·필수 검증·미확인을 빠뜨리지 않고 독립적으로 판단하세요. '
         '파일별 관찰 범위·현재 전체 파일 SHA256·작업트리/확인 날짜/Git 상태를 기록하세요.\n'
+        'file 근거의 줄 수·lines·ref·file_sha256은 evidence_inspect 명령에 --file <절대경로>와 '
+        '--lines <a-b> 또는 --whole-file을 주어 얻은 값을 그대로 쓰세요. 이 검사는 읽기 전용이며 등록하지 않습니다. '
+        '범위를 추측·자동 보정하지 말고, 빈 파일의 null 범위를 file 근거로 제출하지 마세요.\n'
         '읽기 전용입니다. 구현·테스트 실행·파일 작성·근거 등록·freeze·세션 변경·다른 자식 위임을 하지 마세요. '
         '출력 계약과 schema를 읽고 handoff_version:2의 JSON object 하나만 한국어 메시지로 반환하세요. '
+        '최종 응답 전체가 JSON이어야 합니다. 앞뒤 설명·코드 펜스는 금지하며 필요한 설명은 JSON 내부의 기존 필드에 모두 보존하세요. '
         '관찰문은 proposal.evidence[].observation에 한 번만 작성하고 manifest에는 observation을 넣지 마세요. '
         '설명·조건·대안·위험을 축약하지 마세요. 새로운 사용자 판단이 필요하면 결과에 질문으로 남기세요.'
     )
 
 
-def cmd_investigation_ready(args):
-    """初回調査の開始条件だけを返す。回収・保存・モデル呼び出し・提案の公開はしない。"""
-    sid = sid_check(args.session)
+@contextmanager
+def investigation_session(sid):
+    """開始検査と読み取りの間も同じ既存ロックを保持し、状態は変更しない。"""
+    sid = sid_check(sid)
     # locked_session は stale call を停止・保存するので、ここでは使わない。
     with session_lock(sid, create=False):
         session = load_session(sid)
@@ -4386,6 +4429,12 @@ def cmd_investigation_ready(args):
                            for name, digest in data.items()}}
         if call['model_status'] == 'INCOMPLETE':
             output['caveat'] = 'Codex model reported INCOMPLETE; investigation may proceed conditionally, not as verified completion.'
+        yield session, output
+
+
+def cmd_investigation_ready(args):
+    """初回調査の開始条件だけを返す。回収・保存・モデル呼び出し・提案の公開はしない。"""
+    with investigation_session(args.session) as (_, output):
         if getattr(args, 'architect_prompt', False):
             prompt = neutral_architect_prompt(output)
             output.update(architect_prompt=prompt, architect_prompt_sha256=sha256(prompt.encode('utf-8')))
@@ -4417,10 +4466,17 @@ def parser():
     p.add_argument('--session', required=True)
     p.add_argument('--phase', required=True, choices=sorted(PHASES))
     p = sub.add_parser('evidence')
-    ev = p.add_subparsers(dest='action', required=True).add_parser('add')
+    evidence = p.add_subparsers(dest='action', required=True)
+    ev = evidence.add_parser('add')
     ev.add_argument('--session', required=True)
     ev.add_argument('--file', required=True)
     ev.add_argument('--lines', required=True)
+    ev = evidence.add_parser('inspect', help='read-only: source line count, canonical ref, hash and numbered excerpt')
+    ev.add_argument('--session', required=True)
+    ev.add_argument('--file', required=True)
+    bounds = ev.add_mutually_exclusive_group(required=True)
+    bounds.add_argument('--lines', help='explicit inclusive a-b range (never clamped)')
+    bounds.add_argument('--whole-file', action='store_true', help='derive the actual full range; empty file has no range')
     p = sub.add_parser('freeze')
     p.add_argument('--session', required=True)
     p.add_argument('--side', required=True, choices=['claude', 'claude-critique'])
@@ -4476,7 +4532,11 @@ def parser():
     return root
 
 
-COMMANDS = {'init': cmd_init, 'freeze-inputs': cmd_freeze_inputs, 'call': cmd_call, 'evidence': cmd_evidence_add,
+def cmd_evidence(args):
+    return cmd_evidence_inspect(args) if args.action == 'inspect' else cmd_evidence_add(args)
+
+
+COMMANDS = {'init': cmd_init, 'freeze-inputs': cmd_freeze_inputs, 'call': cmd_call, 'evidence': cmd_evidence,
             'freeze': cmd_freeze, 'proposal': cmd_proposal, 'reveal': cmd_reveal, 'ledger': cmd_ledger, 'synthesis': cmd_synthesis,
             'finalize': cmd_finalize, 'status': cmd_status, 'prune': cmd_prune, 'measure-request': cmd_measure_request,
             'verify-codex': cmd_verify_codex, 'investigation-ready': cmd_investigation_ready}

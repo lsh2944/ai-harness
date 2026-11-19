@@ -51,6 +51,50 @@ class ProposalHandoffTests(SubmissionBase):
                                         for item in message['evidence_manifest']]
         return message
 
+    def inspected_message(self, sid):
+        message = self.single_observation_message()
+        inspected = self.env.ok('evidence', 'inspect', '--session', sid,
+                                '--file', self.env.project / 'src/app.py', '--whole-file')
+        message['evidence_manifest'][0].update({key: inspected[key] for key in ('path', 'lines', 'file_sha256')})
+        message['proposal']['evidence'][0]['ref'] = inspected['ref']
+        return message
+
+    def test_inspected_metadata_prepares_and_freezes_without_semantic_rewriting(self):
+        sid = self.proposed()
+        message = self.inspected_message(sid)
+        source = self.draft(' \n' + json.dumps(message, ensure_ascii=False, indent=2) + '\n ')
+        original = source.read_bytes()
+        result, output = self.prepare(sid, message, source=source)
+        self.assertEqual((co.store(sid) / 'architect-handoff.json').read_bytes(), original)
+        self.env.ok('freeze', '--session', sid, '--side', 'claude', '--file', output)
+        expected = copy.deepcopy(message['proposal'])
+        expected['evidence'][0]['id'] = result['evidence_mapping']['local:source_a']
+        self.assertEqual(co.read_json_artifact(sid, 'claude/proposal.json'), expected)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(self.env.calls(), ['proposal'])
+
+    def test_file_change_after_inspect_is_rejected_without_registration(self):
+        sid = self.proposed()
+        message = self.inspected_message(sid)
+        (self.env.project / 'src/app.py').write_text('new1\nnew2\nnew3\nnew4\n')
+        result, _ = self.prepare(sid, message, False)
+        self.assertIn('source hash changed', result['error'])
+        self.assertEqual(self.env.session(sid)['evidence'], [])
+
+    def test_complete_response_with_prefix_suffix_or_fence_is_rejected_not_extracted(self):
+        for before, after in (('설명입니다.\n', ''), ('', '\n추가 설명'), ('```json\n', '\n```'), ('', '\n{}')):
+            with self.subTest(before=before, after=after):
+                sid = self.proposed()
+                message = self.single_observation_message()
+                source = self.draft(before + json.dumps(message, ensure_ascii=False) + after)
+                result, output = self.prepare(sid, message, False, source=source)
+                self.assertEqual(result['status'], 'INVALID')
+                self.assertIn('preserve the complete architect response', result['error'])
+                self.assertEqual(self.env.session(sid)['evidence'], [])
+                self.assertNotIn('proposal_handoff', self.env.session(sid))
+                self.assertFalse(output.exists())
+                self.assertFalse((co.store(sid) / 'architect-handoff.json').exists())
+
     def test_v2_single_observation_preserves_full_proposal_registry_and_freeze(self):
         sid = self.proposed()
         message = self.single_observation_message()

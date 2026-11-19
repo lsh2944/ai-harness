@@ -109,7 +109,10 @@ def prepare(co, session, source, output):
     target = co.submission_draft_target(output)
     if co.now() <= call['ended_at']:
         raise co.Refused('proposal draft cannot be created before the Codex proposal ended')
-    message = co.decode_json(raw)
+    try:
+        message = co.decode_json(raw)
+    except co.SchemaError as error:
+        raise co.SchemaError(str(error) + '; preserve the complete architect response; do not extract JSON, strip prose/fences, rewrite or retry') from None
     proposal, manifests, version = parse_message(co, message)
     evidence = proposal['evidence']
     ids = [item['id'] for item in evidence]

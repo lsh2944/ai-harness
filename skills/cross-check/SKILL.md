@@ -13,6 +13,8 @@ argument-hint: "[검토할 내용] [--review | --frozen-critique | --test-plan |
 
 `investigation-ready --session <sid> --architect-prompt`의 성공과 `ready:true`를 확인한 뒤 반환 `architect_prompt`를 새 architect의 prompt로 **그대로** 전달한다. [JSON 출력 계약](references/architect-handoff.md) 경로도 그 문자열 안에 있다. 메인이 구현 대안·의사코드·버그 설명·요구사항 재해석·새 설명을 추가하거나 위임문을 재작성하지 않는다. 메인은 응답을 원문 그대로 저장하며 인계 오류를 근거 삭제·의미 재작성으로 복구하지 않고 중단·보고한다. prepare 성공 후 초안 변경은 runner가 동결 전에 거부한다.
 
+P1-b file 근거는 고정 위임문이 안내하는 읽기 전용 `evidence inspect`로 실제 줄 범위·ref·hash를 산출한다. 메인은 architect 최종 응답 텍스트 **전체**를 한 번 저장하며 JSON 부분 추출·앞뒤 설명 제거·재직렬화를 하지 않는다. 설명은 처음부터 JSON 내부 기존 필드에 작성한다. 잘못된 범위·JSON 앞뒤 설명은 원본을 보존하고 중단·보고한다([상세 계약](references/architect-handoff.md)).
+
 이번 실행 중 조사 순서 위반을 발견하면 중단·보고한다. 새 파일·새 자식으로 위반을 감추지 않는다. 이 절차는 기존 훅을 유지하며 Read/Bash를 도구 수준에서 차단하지는 않는다.
 
 **내부 진행 관리:** debate의 기본 진행 상태는 runner 세션·`status`와 짧은 사용자 진행 보고로 관리한다. P0~P5 각각을 별도 `TaskCreate`/`TaskUpdate`로 중복 등록하거나 그 목적으로 Task 도구를 검색하지 않는다. 사용자가 체크리스트를 요청했거나 이미 있는 상위 개발 작업에 결과를 연결해야 하면 필요한 Task 관리만 수행한다. 전체 개발 작업의 기존 체크리스트와 필수 단계·중단·검증·보고는 유지한다.
