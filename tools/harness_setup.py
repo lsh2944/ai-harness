@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""setup.sh の補助（標準ライブラリのみ、Python 3.8 以上で動く）。git hook からは使わない。
+"""setup.sh・apply.sh の補助（標準ライブラリのみ、Python 3.8 以上で動く）。git hook からは使わない。
 
 サブコマンド（cwd はリポジトリのどこでもよい。パスはリポジトリ直下からの相対で解決する）:
   system-python                 venv ではない Python 3.11 以上（tomllib あり）を探して表示。なければ終了コード 1
@@ -8,7 +8,8 @@
                                 extra_protected_paths に .githooks 等（PROTECTED_DEFAULTS）の絶対パスを入れる
   aws-mode                      config.local.json の aws 節: off / on / placeholder（見本の値のまま）。
                                 aws が object でない・大文字小文字違いのキーはエラー
-  python-of                     install.py を動かすインタプリタ（設定の python、なければ PATH の python3）
+  python-of                     install.py を動かすインタプリタ（設定の python、なければ venv ではない Python 3.11 以上、
+                                それもなければ PATH の python3）
   apply-command                 利用者が端末で実行する --apply コマンドを表示（実行はしない。placeholder なら終了コード 1）
   dry-run                       install.py の dry-run を実行して要約を表示（書き込みなし）
                                 終了コード: 0=変更予定あり, 3=変更なし, 1=エラー
@@ -34,7 +35,7 @@ FIXED_CANDIDATES = ('/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr
 # venv ではなく、install.py が必要とする tomllib（3.11 以上）を持つかを確かめる
 PROBE = 'import sys, tomllib; sys.exit(0 if sys.prefix == sys.base_prefix else 1)'
 # 新規作成する config.local.json の extra_protected_paths に足す（clone 内の相対パス）
-PROTECTED_DEFAULTS = ('.githooks', 'tools/privacy_check.py', 'tools/harness_setup.py', 'setup.sh')
+PROTECTED_DEFAULTS = ('.githooks', 'tools/privacy_check.py', 'tools/harness_setup.py', 'setup.sh', 'apply.sh')
 PLACEHOLDER_HELP = ('config.local.json 의 aws.roles 또는 aws.mfa_serial 이 아직 견본 값입니다. '
                     '실제 값으로 편집한 뒤 ./setup.sh 를 다시 실행하세요.')
 SUMMARY_LINE = re.compile(r'^DRY-RUN: (\d+) file\(s\) would change')
@@ -114,7 +115,8 @@ def python_of(data):
     value = data.get('python')
     if isinstance(value, str) and value.strip():
         return expand(value.strip())
-    return shutil.which('python3') or 'python3'
+    # 未設定なら venv ではない Python 3.11 以上（install.py は venv の python を拒否する）。見つからなければ PATH の python3
+    return system_python() or shutil.which('python3') or 'python3'
 
 
 def install_args(data):

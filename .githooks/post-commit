@@ -1,0 +1,16 @@
+#!/bin/sh
+# コミット直後、設置本への反映が必要なファイルが変わっていたら ./apply.sh を案内するだけの hook。
+# Python・install.py・apply.sh は実行しない。常に終了コード 0（コミット結果には影響しない）。
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+# マージコミットは第 1 親との差分、それ以外は直前の親（最初のコミットは空ツリー）との差分
+if git rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1; then
+    changed=$(git diff --name-only 'HEAD^1' HEAD -- hooks install settings instructions skills agents tools/aws 2>/dev/null) || exit 0
+else
+    changed=$(git diff-tree --root --no-commit-id --name-only -r HEAD -- hooks install settings instructions skills agents tools/aws 2>/dev/null) || exit 0
+fi
+[ -n "$changed" ] || exit 0
+
+printf '%s\n' "[ai-harness] 설치본 반영 필요: ./apply.sh"
+exit 0

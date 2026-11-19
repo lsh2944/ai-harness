@@ -1,7 +1,7 @@
 #!/bin/sh
 # git pull（merge・fast-forward）後、設置関連ファイルが変わっていたら知らせるだけの hook。
 # Python・install.py・tools/harness_setup.py は実行しない（利用者決定: 通知のみ）。
-# 利用者が端末で実行する dry-run・適用コマンドを絶対パスで案内する。失敗しても merge 結果には影響しない。
+# 利用者が端末で実行する ./apply.sh（絶対パスも併記）を案内する。失敗しても merge 結果には影響しない。
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$root" || exit 0
 git rev-parse -q --verify ORIG_HEAD >/dev/null 2>&1 || exit 0
@@ -28,11 +28,7 @@ fi
 quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
-install=$(quote "$root/install/install.py")
-config=$(quote "$root/config.local.json")
-echo "반영하려면 터미널에서 직접 실행하세요(<python>은 config.local.json의 python 값, null이면 venv가 아닌 python3):"
+echo "반영하려면 터미널에서 ./apply.sh 를 실행하세요(dry-run 요약 후 apply 입력 확인을 거칩니다). 저장소 밖에서는:"
 # パスを含む行は printf '%s\n' で出す（dash の echo は \ を解釈するため）
-printf '%s\n' "  확인(dry-run): <python> $install --config $config"
-printf '%s\n' "  적용:          <python> $install --config $config --apply   (확인 문구에 apply 입력)"
-echo "  AWS 모듈을 쓰는 경우 두 명령 모두 --with-aws 를 붙입니다."
+printf '%s\n' "  $(quote "$root/apply.sh")"
 exit 0

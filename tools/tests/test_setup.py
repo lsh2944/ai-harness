@@ -22,7 +22,10 @@ FAKE_ACCOUNT = ''.join(['3141', '5926', '5358'])
 STUB_INSTALL = '''import json, os, sys
 if '--apply' in sys.argv:
     with open(os.environ['STUB_MARKER'], 'w') as out:
-        json.dump({'argv': sys.argv[1:], 'tty': sys.stdin.isatty()}, out)
+        json.dump({'argv': sys.argv[1:], 'tty': sys.stdin.isatty(), 'exe': sys.executable}, out)
+elif os.environ.get('STUB_NO_CHANGE'):
+    print('SAME   /stub/target')
+    print('DRY-RUN: 0 file(s) would change; nothing was written. Re-run with --apply to install.')
 else:
     print('CREATE /stub/target (+1 lines)')
     print('DRY-RUN: 1 file(s) would change; nothing was written. Re-run with --apply to install.')
@@ -155,7 +158,8 @@ class SetupScriptTests(Fixture):
         self.assertNotIn('aws', config)
         root = self.clone.resolve()
         self.assertEqual(config['extra_protected_paths'], [str(root / '.githooks'), str(root / 'tools/privacy_check.py'),
-                                                           str(root / 'tools/harness_setup.py'), str(root / 'setup.sh')])
+                                                           str(root / 'tools/harness_setup.py'), str(root / 'setup.sh'),
+                                                           str(root / 'apply.sh')])
         self.assertIn('AWS 모듈(--with-aws): off', out)
         self.assertIn('DRY-RUN:', out)
         self.assertIn('--no-apply', out)
@@ -377,8 +381,10 @@ class GitHookTests(Fixture):
         self.assertFalse(self.python_called.exists(), 'post-merge must not run Python')
         self.assertIn('instructions/core.md', out)
         root = str(self.clone.resolve())
-        self.assertIn(f"'{root}/install/install.py' --config '{root}/config.local.json' --apply", out)
-        self.assertIn('--with-aws', out)
+        self.assertIn('./apply.sh', out)
+        self.assertIn(f"'{root}/apply.sh'", out)
+        self.assertNotIn('install.py', out)
+        self.assertNotIn('--apply', out)
         self.assertNotIn('DRY-RUN:', out)
         self.assertFalse((self.home / '.claude').exists(), 'post-merge must not write HOME')
 
@@ -391,7 +397,7 @@ class GitHookTests(Fixture):
         self.git(odd, '-c', 'core.hooksPath=/dev/null', 'pull', '-q', '--ff-only')
         result = subprocess.run(['dash', str(odd / '.githooks/post-merge')], cwd=odd, env=self.env,
                                 capture_output=True, text=True, timeout=30)
-        self.assertIn(f"'{odd.resolve()}/install/install.py'", result.stdout)
+        self.assertIn(f"'{odd.resolve()}/apply.sh'", result.stdout)
 
     def test_post_merge_with_placeholder_aws_asks_for_edit(self):
         example = json.loads((self.clone / 'config.example.json').read_text())
@@ -405,6 +411,178 @@ class GitHookTests(Fixture):
         self.origin_commit('README.md', 'docs only\n')
         out = self.pull()
         self.assertNotIn('ai-harness', out)
+
+    NOTICE = '[ai-harness] 설치본 반영 필요: ./apply.sh'
+
+    def test_post_commit_notifies_only_for_install_paths(self):
+        cases = [('hooks/new_hook.py', True), ('tools/aws/new.sh', True), ('skills/s/SKILL.md', True),
+                 ('README.md', False), ('tools/privacy_note.md', False), ('setup_notes.txt', False)]
+        for name, expected in cases:
+            with self.subTest(name=name):
+                path = self.clone / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f'{name}\n')
+                self.git(self.clone, 'add', '--', name)
+                result = self.commit(self.clone, 'change ' + name)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                output = result.stdout + result.stderr
+                if expected:
+                    self.assertIn(self.NOTICE, output)
+                else:
+                    self.assertNotIn('ai-harness', output)
+        self.assertFalse((self.home / '.claude').exists(), 'post-commit must not write HOME')
+
+    def run_post_commit(self, cwd):
+        return subprocess.run(['sh', str(self.clone / '.githooks/post-commit')], cwd=cwd, env=self.env,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_post_commit_handles_root_and_merge_commits_without_python(self):
+        self.poison_python()
+        fresh = self.base / 'fresh'
+        fresh.mkdir()
+        self.git(fresh, 'init', '-q', '-b', 'main')
+        self.git(fresh, 'config', 'user.name', 'A')
+        self.git(fresh, 'config', 'user.email', 'a@example.com')
+        plain = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false']
+        # 最初のコミット（親なし）でも検出する
+        (fresh / 'agents').mkdir()
+        (fresh / 'agents/a.md').write_text('a\n')
+        self.git(fresh, 'add', '-A')
+        self.git(fresh, *plain, 'commit', '-qm', 'root')
+        result = self.run_post_commit(fresh)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, self.NOTICE))
+        # マージコミットは第 1 親との差分で判定する（相手側ブランチの設置関連変更を検出）
+        self.git(fresh, 'checkout', '-q', '-b', 'side')
+        (fresh / 'install').mkdir()
+        (fresh / 'install/x.py').write_text('x\n')
+        self.git(fresh, 'add', '-A')
+        self.git(fresh, *plain, 'commit', '-qm', 'side')
+        self.git(fresh, 'checkout', '-q', 'main')
+        (fresh / 'README.md').write_text('r\n')
+        self.git(fresh, 'add', '-A')
+        self.git(fresh, *plain, 'commit', '-qm', 'docs')
+        self.git(fresh, *plain, 'merge', '-q', '--no-ff', '--no-edit', 'side')
+        result = self.run_post_commit(fresh)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, self.NOTICE))
+        # 設置関連の変更がない通常コミット
+        (fresh / 'README.md').write_text('r2\n')
+        self.git(fresh, 'add', '-A')
+        self.git(fresh, *plain, 'commit', '-qm', 'docs2')
+        result = self.run_post_commit(fresh)
+        self.assertEqual((result.returncode, result.stdout), (0, ''))
+        # Git 管理外でも失敗しない
+        outside = self.base / 'outside'
+        outside.mkdir()
+        result = self.run_post_commit(outside)
+        self.assertEqual((result.returncode, result.stdout), (0, ''))
+        self.assertFalse(self.python_called.exists(), 'post-commit must not run Python')
+
+
+class ApplyScriptTests(Fixture):
+    """apply.sh。スタブ install.py で、dry-run 要約の後に --apply が端末から呼ばれることを確かめる。"""
+
+    def setUp(self):
+        super().setUp()
+        self.use_stub_install()
+
+    def apply(self, answers=(), *args):
+        return run_pty([str(self.clone / 'apply.sh'), *args], list(answers), self.base, self.env)
+
+    def record(self):
+        return json.loads(self.marker.read_text())
+
+    def assert_home_untouched(self):
+        for name in ('.claude', '.claude.json', '.codex', '.agents', '.ai-harness'):
+            self.assertFalse((self.home / name).exists(), name)
+
+    def test_missing_config_suggests_setup(self):
+        code, out = self.apply()
+        self.assertEqual(code, 1, out)
+        self.assertIn('./setup.sh', out)
+        self.assertFalse(self.marker.exists())
+
+    def test_non_tty_is_refused(self):
+        self.write_config()
+        result = subprocess.run([str(self.clone / 'apply.sh')], cwd=self.base, env=self.env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('터미널', result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_windows_is_refused(self):
+        self.write_config()
+        fake = self.base / 'fakebin'
+        fake.mkdir()
+        (fake / 'uname').write_text('#!/bin/sh\necho MSYS_NT-10.0\n')
+        (fake / 'uname').chmod(0o755)
+        self.env['PATH'] = f'{fake}:{self.env["PATH"]}'
+        code, out = self.apply()
+        self.assertEqual(code, 1, out)
+        self.assertIn('Windows', out)
+        self.assertFalse(self.marker.exists())
+
+    def test_unknown_option_is_rejected(self):
+        self.write_config()
+        code, out = self.apply((), '--yes')
+        self.assertEqual(code, 2, out)
+        self.assertIn('usage', out)
+        self.assertFalse(self.marker.exists())
+
+    def test_placeholder_aws_asks_for_edit(self):
+        example = json.loads((self.clone / 'config.example.json').read_text())
+        self.write_config(aws=example['aws'])
+        code, out = self.apply()
+        self.assertEqual(code, 1, out)
+        self.assertIn('견본 값', out)
+        self.assertNotIn('DRY-RUN', out)
+        self.assertFalse(self.marker.exists())
+
+    def test_no_change_reports_up_to_date(self):
+        self.write_config()
+        self.env['STUB_NO_CHANGE'] = '1'
+        code, out = self.apply()
+        self.assertEqual(code, 0, out)
+        self.assertIn('이미 최신', out)
+        self.assertNotIn('/stub/target', out)
+        self.assertFalse(self.marker.exists())
+
+    def test_runs_install_with_apply_on_terminal_after_dry_run(self):
+        self.write_config()
+        code, out = self.apply()
+        self.assertEqual(code, 0, out)
+        self.assertIn('AWS 모듈(--with-aws): off', out)
+        self.assertIn('CREATE /stub/target', out)
+        self.assertLess(out.index('DRY-RUN: 1 file(s)'), out.index('Claude Code·Codex'))
+        record = self.record()
+        self.assertTrue(record['tty'])
+        self.assertEqual(record['argv'], ['--config', str(self.clone.resolve() / 'config.local.json'), '--apply'])
+        self.assertEqual(record['exe'], BASE_PYTHON)
+        self.assert_home_untouched()
+
+    def test_runs_from_other_cwd_with_aws(self):
+        self.write_config(aws={'profile': 'p', 'roles': {'DEV': 'arn:aws:iam::' + FAKE_ACCOUNT + ':role/r'},
+                               'mfa_serial': 'arn:aws:iam::' + FAKE_ACCOUNT + ':mfa/d'})
+        elsewhere = self.base / 'elsewhere'
+        elsewhere.mkdir()
+        code, out = run_pty([str(self.clone / 'apply.sh')], [], elsewhere, self.env)
+        self.assertEqual(code, 0, out)
+        self.assertIn('AWS 모듈(--with-aws): on', out)
+        self.assertEqual(self.record()['argv'], ['--config', str(self.clone.resolve() / 'config.local.json'),
+                                                 '--with-aws', '--apply'])
+        self.assert_home_untouched()
+
+    @unittest.skipUnless(HAS_TOMLLIB, 'system Python detection needs Python 3.11+')
+    def test_null_python_uses_system_python_outside_venv(self):
+        # PATH の先頭に venv の python3 を置いても、install.py は venv ではない python3 で動かす
+        venv = self.base / 'venv'
+        (venv / 'bin').mkdir(parents=True)
+        (venv / 'pyvenv.cfg').write_text('home = /nowhere\n')
+        (venv / 'bin/python3').symlink_to(BASE_PYTHON)
+        self.env['PATH'] = f'{venv / "bin"}:{self.env["PATH"]}'
+        self.write_config(python=None)
+        code, out = self.apply()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(Path(self.record()['exe']).parent, self.bin)
 
 
 class HelperTests(Fixture):
