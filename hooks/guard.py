@@ -219,7 +219,8 @@ DEPLOY_PATTERNS = [
     r"\bterraform\s+(apply|destroy|import)\b",
     r"\bserverless\s+(deploy|remove)\b",
     r"\b(npm|yarn|pnpm)\s+(run\s+)?[\w:.-]*(deploy|destroy)\b",
-    r"\bgreengrass-cli\b.*\bdeployment\s+create\b",
+    # 「A の後（改行まで）に B」は ORDERED 形式で線形時間に判定する（下の ordered_search）
+    ((r"\bgreengrass-cli\b", r"\bdeployment\s+create\b"), "\n"),
 ]
 # 認証情報の差し替え・回避
 CRED_BYPASS = [
@@ -228,7 +229,7 @@ CRED_BYPASS = [
 ]
 # プロファイル固定（aws.enabled のときだけ判定）
 PROFILE_BYPASS = [
-    r"\bunset\s+[^;&|]*\bAWS_(PROFILE|DEFAULT_PROFILE)\b",
+    ((r"\bunset\s+", r"\bAWS_(PROFILE|DEFAULT_PROFILE)\b"), "[;&|]"),
     r"\bexport\s+AWS_(PROFILE|DEFAULT_PROFILE)\s*=",
 ]
 
@@ -237,13 +238,37 @@ INLINE_DELETE = [
     r"\bshutil\.rmtree\s*\(",
     r"\.unlink\s*\(",
     r"\bfs\.(rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync)\s*\(",
-    r"\bfind\b[^;&|]*\s-delete\b",
-    r"\bfind\b[^;&|]*-(exec|execdir|ok|okdir)\b[^;&|]*\b(rm|unlink|rmdir|shred)\b",
-    r"\bperl\b.*\b(unlink|rmtree|remove_tree)\b",
-    r"\bxargs\b[^;&|]*\b(rm|unlink)\b",
+    ((r"\bfind\b", r"\s-delete\b"), "[;&|]"),
+    ((r"\bfind\b", r"-(exec|execdir|ok|okdir)\b", r"\b(rm|unlink|rmdir|shred)\b"), "[;&|]"),
+    ((r"\bperl\b", r"\b(unlink|rmtree|remove_tree)\b"), "\n"),
+    ((r"\bxargs\b", r"\b(rm|unlink)\b"), "[;&|]"),
     r"\bgit\s+(clean|rm)\b",
-    r"\brsync\b[^;&|]*--delete",
+    ((r"\brsync\b", r"--delete"), "[;&|]"),
 ]
+# hook の timeout は C 実装の正規表現の途中では効かない（alarm も割り込めない）ため、これを超える Bash は判定前に確認へ回す
+BASH_MAX_CHARS = 64 * 1024
+
+
+def ordered_search(pattern, text):
+    """正規表現（文字列）か ((A, B, …), 区切り) を検索し、一致部分の文字列か None を返す。
+    後者は区切りで分けた同じ区間内に A, B, … がこの順に現れるか。`A[^;&|]*B`・`A.*B` と同じ判定を、
+    A が多数現れる長い入力でも二乗時間にならないよう、各区間で最初の一致から順に探して線形時間で行う。"""
+    if isinstance(pattern, str):
+        m = re.search(pattern, text)
+        return m.group(0) if m else None
+    parts, sep = pattern
+    for span in re.split(sep, text):
+        start, pos = None, 0
+        for part in parts:
+            # pos 指定の検索は直前の文字も \b の判定に使う（切り出しと違い境界が変わらない）
+            m = re.compile(part).search(span, pos)
+            if not m:
+                break
+            start = m.start() if start is None else start
+            pos = m.end()
+        else:
+            return span[start:pos]
+    return None
 
 
 def out(decision, reason):
@@ -374,7 +399,8 @@ def contains_secret(path):
 
 def brace_expand(s, limit=64):
     """入れ子なしの {a,b} を展開する（シェル展開の近似）。上限超過は切り捨てず None"""
-    m = re.search(r"\{([^{}]*,[^{}]*)\}", s)
+    # 先頭部分にカンマを含めない（`{,,,…` の長い入力で二乗時間の後戻りにならないよう。一致範囲は同じ）
+    m = re.search(r"\{([^{},]*,[^{}]*)\}", s)
     if not m:
         return [s]
     out = []
@@ -770,10 +796,23 @@ def check_harness_exec(cmd, cwd):
 
 
 # Bash の書き込み判定。リダイレクトと、対象ファイルを書き換えるコマンド。
-REDIRECT_RE = r">\s*[^&\s]|>&\s*[^\d\s&-]"
-WRITE_CMD_RE = re.compile(r"\btee\b|\bsed\b[^;&|]*\s(-[A-Za-z]*i|--in-place)|\bcp\b|\bmv\b|\bchmod\b|\bln\b|"
-                          r"\bperl\b[^;&|]*\s-[A-Za-z]*i|\bpython3?\b.*(open|write|dump)|\btruncate\b")
-WRITE_RE = re.compile(REDIRECT_RE + "|" + WRITE_CMD_RE.pattern)
+# /dev/null への出力捨て・fd 複製（2>/dev/null・>&2 等）。数字列の途中から始めない（長い数字列で二乗時間にしない）
+DEVNULL_RE = re.compile(r"(?<!\d)\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|(?<!\d)\d*>&\d+")
+REDIRECT_RE = re.compile(r">\s*[^&\s]|>&\s*[^\d\s&-]")
+WRITE_SIMPLE_RE = re.compile(r"\b(tee|cp|mv|chmod|ln|truncate)\b")
+WRITE_ORDERED = (((r"\bsed\b", r"\s(-[A-Za-z]*i|--in-place)"), "[;&|]"),
+                 ((r"\bperl\b", r"\s-[A-Za-z]*i"), "[;&|]"),
+                 ((r"\bpython3?\b", r"(open|write|dump)"), "\n"))
+
+
+def is_write_text(text):
+    """書き込みを伴うコマンド・リダイレクトを文字列で検出する（線形時間）。"""
+    return bool(REDIRECT_RE.search(text) or legacy_write_text(text))
+
+
+def legacy_write_text(text):
+    """リダイレクト以外の書き込みコマンド（tee・sed -i・cp・mv・chmod・ln・perl -i・python の書き込み・truncate）。"""
+    return bool(WRITE_SIMPLE_RE.search(text) or any(ordered_search(p, text) for p in WRITE_ORDERED))
 # hook 入力に cwd がないとき、相対パスの書き込み対象がこの名前（パス要素単位）を含めば承認対象にする
 FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
                             "privacy_check.py", "harness_setup.py", "setup.sh")
@@ -861,79 +900,306 @@ def _update_write_cwd(state, seg, dynamic_cd):
         state.unknown = True
 
 
-def _write_candidates(seg, state):
-    """書き込み系セグメントの対象候補文字列と、先頭のコマンド名を返す。書き込み系でなければ None。"""
-    clean = re.sub(r"\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|\d*>&\d+", " ", seg)
+LITERAL_RE = re.compile(r"'([^'\n]*)'|\"([^\"\n]*)\"")
+
+
+def _positional(args, value_shorts="", value_longs=()):
+    """オプション（値を取るものは値も）を除いた位置引数。"""
+    out, k, end = [], 0, False
+    while k < len(args):
+        a = args[k]
+        k += 1
+        if end or a == "-" or not a.startswith("-"):
+            out.append(a)
+        elif a == "--":
+            end = True
+        elif a.startswith("--"):
+            if "=" not in a and a in value_longs:
+                k += 1
+        else:
+            # 短縮オプションのまとめ書き: 値を取る文字が末尾なら次の引数が値
+            for n, c in enumerate(a[1:], 2):
+                if c in value_shorts:
+                    k += 1 if n == len(a) else 0
+                    break
+    return out
+
+
+def _option_values(args, shorts="", longs=()):
+    """指定オプションの値（-o X・-oX・まとめ書き -sSo X・--output=X・--output X）。"""
+    values, k = [], 0
+    while k < len(args):
+        a = args[k]
+        k += 1
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, value = a.partition("=")
+            if name in longs:
+                if not eq:
+                    value = args[k] if k < len(args) else ""
+                    k += 1
+                values.append(value)
+        elif a.startswith("-") and a != "-":
+            for n, c in enumerate(a[1:], 2):
+                if c in shorts:
+                    value = a[n:]
+                    if not value:
+                        value = args[k] if k < len(args) else ""
+                        k += 1
+                    values.append(value)
+                    break
+    return values
+
+
+def _cluster_has(args, letters):
+    """単一ダッシュの短縮オプションに letters のいずれかを含むか。"""
+    return any(a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters) for a in args)
+
+
+def _git_writes(args):
+    """git の作業ツリーを書き換えるサブコマンド（apply・checkout・restore・stash）の基準ディレクトリ。"""
+    k, base = 0, None
+    while k < len(args) and args[k].startswith("-"):
+        a = args[k]
+        if a in ("-C", "--work-tree") and k + 1 < len(args):
+            # -C は累積、--work-tree は -C 適用後の位置から解釈される（絶対パスなら置き換え）
+            base = os.path.join(base or "", args[k + 1])
+            k += 2
+            continue
+        if a.startswith("--work-tree="):
+            base = os.path.join(base or "", a.split("=", 1)[1])
+        k += 2 if a in ("-c", "--git-dir", "--namespace", "--exec-path", "--config-env") else 1
+    sub = args[k] if k < len(args) else ""
+    rest = args[k + 1:]
+    if sub not in ("apply", "checkout", "restore", "stash"):
+        return [], []
+    if sub == "stash" and rest[:1] in (["list"], ["show"]):
+        return [], []
+    if sub == "apply" and "--apply" not in rest and any(a in ("--check", "--stat", "--numstat", "--summary") for a in rest):
+        return [], []
+    return [], [(base, True)]
+
+
+def _command_writes(argv, text):
+    """コマンドごとの書き込み対象。対象コマンドでなければ None。
+    戻り値は (候補 [(値, 厳密, 祖先判定)], 展開先 [(ディレクトリ値 or None=実行ディレクトリ, ハーネス内も対象)])。
+    厳密: 未展開の変数を含むとき実行ディレクトリがハーネス内なら承認（スクリプト・コードの引数は対象外）。
+    祖先判定: 保護パスの上位ディレクトリも承認対象（mv・ln・chmod）。"""
+    prog, args = os.path.basename(argv[0]), argv[1:]
+    if prog == "tee":
+        return [(v, True, False) for v in _positional(args)], []
+    if prog in ("sed", "perl"):
+        # sed -i・perl -i（まとめ書き -pi・-i.bak・BSD の -i '' を含む）
+        if not any(a.startswith("--in-place") or (not a.startswith("--") and re.match(r"-[A-Za-z]*i", a)) for a in args):
+            return [], []
+        script_letters, values = ("ef", "efl") if prog == "sed" else ("eE", "eEI")
+        scripted = any(a.startswith(("--expression", "--file")) or (not a.startswith("--") and re.match(
+            r"-[A-Za-z]*[" + script_letters + "]", a)) for a in args)
+        files = [p for p in _positional(args, values, ("--expression", "--file", "--line-length")) if p]
+        # -e・-f がなければ最初の位置引数はスクリプト
+        return [(v, True, False) for v in (files if scripted else files[1:])], []
+    if re.fullmatch(r"python[0-9.]*", prog):
+        if not ordered_search(WRITE_ORDERED[2], text):
+            return [], []
+        # コード中の文字列リテラルもパスとして扱う（コードは厳密判定の対象外）
+        return ([(w, False, False) for w in args] +
+                [(a or b, False, False) for w in args for a, b in LITERAL_RE.findall(w)]), []
+    if prog in ("cp", "ln", "mv", "install"):
+        shorts, longs = ("mogSBtf", ("--mode", "--owner", "--group", "--suffix", "--target-directory")) \
+            if prog == "install" else ("St", ("--suffix", "--target-directory"))
+        targets = _option_values(args, "t", ("--target-directory",))
+        pos = _positional(args, shorts, longs)
+        if prog == "mv" or (prog == "install" and (_cluster_has(args, "d") or "--directory" in args)):
+            paths = pos + targets  # mv は移動元も変更対象、install -d は全引数を作成
+        elif targets:
+            paths = targets
+        elif prog == "ln" and len(pos) == 1:
+            paths = [os.path.basename(pos[0].rstrip("/")) or pos[0]]  # 実行ディレクトリに同名のリンクを作る
+        else:
+            paths = pos[-1:] if len(pos) >= 2 else []  # cp・ln・install は宛先のみ（読み取り元は対象外）
+        return [(v, True, prog in ("mv", "ln")) for v in paths], []
+    if prog == "chmod":
+        pos = [a for a in args if a != "--" and not re.fullmatch(r"-[RfvhHLPcEC]+|--[A-Za-z-]+(=.*)?", a)]
+        if not any(a.startswith("--reference") for a in args):
+            pos = pos[1:]  # 先頭はモード（-w 等の記号モードを含む）
+        return [(v, True, True) for v in pos], []
+    if prog == "truncate":
+        return [(v, True, False) for v in _positional(args, "sr", ("--size", "--reference"))], []
+    if prog == "dd":
+        return [(a[3:], True, False) for a in args if a.startswith("of=")], []
+    if prog == "rsync":
+        values = COPY_VALUE_OPTS["rsync"]
+        pos = _positional(args, "".join(o[1] for o in values if len(o) == 2), values)
+        # 宛先がリモート（host:path・rsync://）なら対象外
+        return [(pos[-1], True, False)] if len(pos) >= 2 and not re.match(r"[^/]*:", pos[-1]) else [], []
+    if prog == "curl":
+        return [(v, True, False) for v in _option_values(args, "o", ("--output",))], []
+    if prog == "wget":
+        return [(v, True, False) for v in _option_values(args, "O", ("--output-document",))], []
+    if prog == "patch":
+        outputs = _option_values(args, "o", ("--output",))
+        pos = _positional(args, "dopiFrDBVYzgx", ("--directory", "--output", "--strip", "--input", "--fuzz",
+                                                   "--reject-file", "--ifdef", "--prefix", "--version-control",
+                                                   "--basename-prefix", "--suffix", "--get"))
+        # パッチ内のファイル名は分からないため、適用先ディレクトリ（-d・実行ディレクトリ）で判定する
+        dirs = _option_values(args, "d", ("--directory",))
+        return [(v, True, False) for v in outputs + pos[:1]], [(d, True) for d in dirs] or [(None, True)]
+    if prog == "git":
+        return _git_writes(args)
+    if prog in ("tar", "bsdtar", "gtar"):
+        old_style = bool(args) and re.fullmatch(r"[A-Za-z]+", args[0]) and "x" in args[0]
+        if not (old_style or "--extract" in args or "--get" in args or any(
+                re.fullmatch(r"-[A-Za-z]+", a) and "x" in a for a in args)):
+            return [], []
+        dirs = _option_values(args, "C", ("--directory",))
+        return [], [(d, False) for d in dirs] or [(None, False)]
+    if prog == "unzip":
+        # 一覧・検査・標準出力への展開は書き込みなし（-d の値は除いて判定）
+        if any(re.fullmatch(r"-[A-Za-z]+", a) and not a.startswith("-d") and set(a[1:]) & set("ltvpcZz") for a in args):
+            return [], []
+        dirs = _option_values(args, "d", ())
+        return [], [(d, False) for d in dirs] or [(None, False)]
+    return None
+
+
+def _segment_writes(seg, state):
+    """セグメントの書き込み対象 (候補, 展開先)。書き込みがなければ None。"""
+    clean = DEVNULL_RE.sub(" ", seg)
     pending = state.pending_redirect
     # `>|` はセグメント分割で切れるため、次のセグメントの先頭語をリダイレクト先として扱う
     state.pending_redirect = clean.rstrip().endswith(">")
-    command_write = WRITE_CMD_RE.search(clean)
-    if not (pending or command_write or re.search(REDIRECT_RE, clean)):
-        return None
     words = _shell_words(clean)
-    _, argv = strip_prefix(tokens(clean))
-    # `>|` の続きのセグメントは先頭語がリダイレクト先なのでコマンド名として除外しない
-    name = argv[0] if argv and not pending else None
     if words is None:
-        # 字句解析できない場合は演算子・クォート記号で区切ったすべての語を対象にする（安全側）
-        parts = re.split(r"[<>&|;()'\"\s]+", clean)
-        return [p for p in parts if p], name
-    found = [words[0]] if pending and words else []
-    skip = False
+        # 字句解析できない場合は書き込みらしければ演算子・クォート記号で区切ったすべての語を対象にする（安全側）
+        parts = [p for p in re.split(r"[<>&|;()'\"\s]+", clean) if p]
+        first = os.path.basename(parts[0]) if parts else ""
+        if not (pending or is_write_text(clean) or first in WRITE_PROGS):
+            return None
+        return [(p, False, False) for p in (parts if pending else parts[1:])], []
+    cands, trees = [], []
+    if pending and words:
+        cands.append((words[0], True, False))
+        words = words[1:]
+    simple, skip = [], False
     for n, w in enumerate(words):
         if skip:
             skip = False
             continue
-        operator = bool(w) and all(c in "();<>|&" for c in w)
-        if operator:
+        if w and all(c in "();<>|&" for c in w):
             # 入力リダイレクト・heredoc の語は読み取り元なので除き、出力リダイレクトの語は対象にする
             if "<" in w and ">" not in w:
                 skip = True
             elif ">" in w and n + 1 < len(words):
-                found.append(words[n + 1])
+                cands.append((words[n + 1], True, False))
                 skip = True
             continue
-        if command_write:
-            found.append(w)
-            # python -c・perl -e 等のコード中の文字列リテラルもパスとして扱う
-            found += [a or b for a, b in re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", w)]
-    out = []
-    for w in found:
-        for v in (w, w.split("=", 1)[-1]):
-            if v and not v.startswith("-") and v not in out:
-                out.append(v)
-    return out, name
+        simple.append(w)
+    while simple and simple[0] in SHELL_LEADERS:
+        simple.pop(0)
+    _, argv = strip_prefix(simple)
+    if argv and not pending:
+        result = _command_writes(argv, clean)
+        if result is not None:
+            cands += result[0]
+            trees += result[1]
+        elif legacy_write_text(clean):
+            # find -exec cp・xargs mv など書き込みコマンドが引数側にある場合は、すべての語とリテラルを対象にする
+            cands += [(w, False, False) for w in argv[1:]]
+            cands += [(a or b, False, False) for w in argv[1:] for a, b in LITERAL_RE.findall(w)]
+    return (cands, trees) if cands or trees else None
+
+
+WRITE_PROGS = {"tee", "sed", "perl", "cp", "ln", "mv", "install", "chmod", "truncate", "dd", "rsync", "curl", "wget",
+               "patch", "git", "tar", "bsdtar", "gtar", "unzip", "python", "python3"}
+
+
+def _in_harness(path):
+    return bool(HARNESS_HOME) and any(path == h or path.startswith(h + "/")
+                                      for h in dict.fromkeys((HARNESS_HOME, os.path.realpath(HARNESS_HOME))))
+
+
+def _protected_ancestor(path):
+    """保護パスの上位ディレクトリ（移動・リンク差し替え・権限変更で保護を外せる位置）なら True。"""
+    prefix = path.rstrip("/") + "/"
+    return any(base.startswith(prefix) for base, _ in _protected_entries())
+
+
+def _check_write_target(value, strict, ancestor, state):
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if strict and "$" in expanded and any(_in_harness(d) for d in state.dirs):
+        return ("ask", f"未展開の変数を含む書き込み先（実行ディレクトリがハーネス内）: {value[:200]}")
+    if os.path.isabs(expanded):
+        bases = ["/"]
+    else:
+        if state.unknown:
+            return ("ask", f"実行ディレクトリが確定できないため相対パスの書き込みは確認が必要: {value[:200]}")
+        if state.nobase:
+            padded = "/" + os.path.normpath(expanded) + "/"
+            if any("/" + n.rstrip("/") + "/" in padded for n in FALLBACK_PROTECTED_NAMES):
+                return ("ask", f"ガード設定/認証関連ファイルの変更を含む可能性: {value[:200]}")
+        bases = state.dirs
+    for base in bases:
+        key = (value, base, ancestor)
+        if key not in state.cache:
+            # heredoc 等で同じ語が繰り返されるため、実体パス解決の結果をコマンド内で再利用する
+            paths = path_variants(value, base)
+            if paths is None:
+                state.cache[key] = ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要")
+            else:
+                state.cache[key] = next((("ask", f"ガード設定/認証関連ファイルの変更: {p}") for p in paths
+                                         if is_protected_write(p)), None) or next(
+                    (("ask", f"保護パスを含むディレクトリの移動・リンク・権限変更: {p}") for p in paths
+                     if ancestor and _protected_ancestor(p)), None)
+        if state.cache[key]:
+            return state.cache[key]
+    return None
+
+
+def _check_tree(value, harness, state):
+    """展開・パッチ適用・git 作業ツリー変更の基準ディレクトリが保護パスの中（git・patch は上位・ハーネス内も）なら承認。"""
+    if value is None:
+        if state.unknown:
+            return ("ask", "実行ディレクトリが確定できないため展開・パッチ適用は確認が必要")
+        dirs = [x for d in state.dirs for x in (d, os.path.realpath(d))]
+    else:
+        expanded = os.path.expandvars(os.path.expanduser(value))
+        if "$" in expanded:
+            if any(_in_harness(d) for d in state.dirs):
+                return ("ask", f"未展開の変数を含む展開先（実行ディレクトリがハーネス内）: {value[:200]}")
+            return None
+        if not os.path.isabs(expanded) and state.unknown:
+            return ("ask", "実行ディレクトリが確定できないため展開・パッチ適用は確認が必要")
+        dirs = []
+        for base in (["/"] if os.path.isabs(expanded) else state.dirs):
+            paths = path_variants(value, base)
+            if paths is None:
+                return ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要")
+            dirs += paths
+    for d in dirs:
+        # 展開（tar・unzip）は保護ディレクトリ内のみ。git・patch は書き込み先が引数に現れないため上位・ハーネス内も
+        if is_protected_write(d) or (harness and (_protected_ancestor(d) or _in_harness(d))):
+            return ("ask", f"保護パスを含む場所での展開・パッチ適用・作業ツリー変更: {d}")
+    return None
 
 
 def check_protected_write(seg, state):
     """セグメントの書き込み対象を実行ディレクトリ候補で絶対パス・実体パスにし、保護パスと比較する。"""
-    result = _write_candidates(seg, state)
+    result = _segment_writes(seg, state)
     if not result:
         return None
-    candidates, name = result
-    for value in candidates:
-        expanded = os.path.expandvars(os.path.expanduser(value))
-        if os.path.isabs(expanded):
-            bases = ["/"]
-        else:
-            if value == name:
-                continue
-            if state.unknown:
-                return ("ask", f"実行ディレクトリが確定できないため相対パスの書き込みは確認が必要: {seg[:200]}")
-            if state.nobase:
-                padded = "/" + os.path.normpath(expanded) + "/"
-                if any("/" + n.rstrip("/") + "/" in padded for n in FALLBACK_PROTECTED_NAMES):
-                    return ("ask", f"ガード設定/認証関連ファイルの変更を含む可能性: {value[:200]}")
-            bases = state.dirs
-        for base in bases:
-            key = (value, base)
-            if key not in state.cache:
-                # heredoc 等で同じ語が繰り返されるため、実体パス解決の結果をコマンド内で再利用する
-                paths = path_variants(value, base)
-                state.cache[key] = ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要") if paths is None else next(
-                    (("ask", f"ガード設定/認証関連ファイルの変更: {p}") for p in paths if is_protected_write(p)), None)
-            if state.cache[key]:
-                return state.cache[key]
+    cands, trees = result
+    for value, strict, ancestor in cands:
+        # --opt=path・of=path 形式の値も対象にする
+        for v in dict.fromkeys((value, value.split("=", 1)[-1])):
+            if v and not v.startswith("-"):
+                r = _check_write_target(v, strict, ancestor, state)
+                if r:
+                    return r
+    for value, harness in trees:
+        r = _check_tree(value, harness, state)
+        if r:
+            return r
     return None
 
 
@@ -949,10 +1215,17 @@ def _logical_segments(cmd):
             c = piece[k]
             if quote == "'":
                 quote = None if c == "'" else quote
+            elif quote == "$'":
+                # ANSI-C クォートはバックスラッシュでエスケープできる
+                k += 1 if c == "\\" else 0
+                quote = None if c == "'" else quote
             elif c == "\\":
                 k += 1
             elif quote == '"':
                 quote = None if c == '"' else quote
+            elif piece.startswith("$'", k):
+                quote = "$'"
+                k += 1
             elif c in "'\"":
                 quote = c
             k += 1
@@ -967,48 +1240,110 @@ def _logical_segments(cmd):
 HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([A-Za-z0-9_.-]+)'|\"([A-Za-z0-9_.-]+)\"|([A-Za-z0-9_.-]+))")
 
 
+def _loose_words(text):
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return [t.strip("'\"") for t in text.split()]
+
+
+def _git_message_command(words):
+    """git commit・git tag なら (サブコマンド, 以降の引数)。それ以外は None。"""
+    while words and words[0] in SHELL_LEADERS:
+        words = words[1:]
+    _, argv = strip_prefix(words)
+    if not argv or os.path.basename(argv[0]) != "git":
+        return None
+    k = 1
+    while k < len(argv) and argv[k].startswith("-"):
+        k += 2 if argv[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+    return (argv[k], argv[k + 1:]) if k < len(argv) and argv[k] in ("commit", "tag") else None
+
+
+def _heredoc_is_data(inner, piped, enclosing):
+    """heredoc 本文がデータとしてだけ使われるか。本文を読むコマンドが cat・tee・git commit/tag -F - で、
+    パイプで他のコマンドへ渡さず、$(…) 内なら外側が git commit/tag（メッセージ引数）の場合に限る。"""
+    if piped or len(enclosing) > 1:
+        return False
+    words = _loose_words(inner)
+    while words and words[0] in SHELL_LEADERS:
+        words = words[1:]
+    _, argv = strip_prefix(words)
+    if not argv:
+        return False
+    prog = os.path.basename(argv[0])
+    if enclosing:
+        return prog == "cat" and enclosing[0] is not None and _git_message_command(_loose_words(enclosing[0])) is not None
+    if prog in ("cat", "tee"):
+        return True
+    git = _git_message_command(words)
+    if not git:
+        return False
+    rest = git[1]
+    return any(a in ("-F-", "--file=-") or (a in ("-F", "--file") and rest[n + 1:n + 2] == ["-"])
+               for n, a in enumerate(rest))
+
+
 def strip_literal_heredocs(cmd):
-    """区切りをクォートした heredoc（<<'EOF'）の本文を除く。本文は展開・実行されないデータのため。
-    クォート外の << だけを対象にし（$(…) 内はクォート文脈を戻す）、区切りが未クォートの本文は残す。"""
+    """区切りをクォートした heredoc（<<'EOF'）のうち、本文がデータとしてだけ使われるもの（_heredoc_is_data）の本文を除く。
+    クォート外の << だけを対象にし（$(…) 内はクォート文脈を戻す、$'…' も扱う）、単語先頭の # 以降は注釈として読まない。
+    区切りが未クォートの本文や、本文を実行し得るコマンド（source /dev/stdin・sh 等）の本文は残す。"""
     lines = cmd.split("\n")
     out, i, quote, stack = [], 0, None, []
     while i < len(lines):
         line = lines[i]
         out.append(line)
         i += 1
-        found, k = [], 0
+        found, k, start = [], 0, 0
         while k < len(line):
             c = line[k]
             if quote == "'":
                 quote = None if c == "'" else quote
+            elif quote == "$'":
+                k += 1 if c == "\\" else 0
+                quote = None if c == "'" else quote
             elif c == "\\":
                 k += 1
             elif line.startswith("$(", k):
-                stack.append(quote)
+                # (外側のクォート, 外側コマンドの開始位置, 外側コマンドの文字列)
+                stack.append((quote, start, line[start:k]))
                 quote = None
                 k += 1
+                start = k + 1
             elif quote == '"':
                 quote = None if c == '"' else quote
+            elif line.startswith("$'", k):
+                quote = "$'"
+                k += 1
             elif c in "'\"":
                 quote = c
+            elif c == "#" and (k == 0 or line[k - 1] in " \t;&|()"):
+                break  # 注釈
             elif c == "(":
-                stack.append(None)
+                stack.append((None, start, None))
+                start = k + 1
             elif c == ")" and stack:
-                quote = stack.pop()
+                quote, start, _ = stack.pop()
+            elif c in ";&|":
+                start = k + 1
             elif line.startswith("<<", k) and not line.startswith("<<<", k):
                 m = HEREDOC_RE.match(line, k)
                 if m:
-                    found.append((m.group(1) == "-", m.group(2) or m.group(3), m.group(4)))
+                    tail = re.match(r"[^;&|)]*", line[m.end():]).group(0)
+                    after = line[m.end() + len(tail):]
+                    piped = after.startswith("|") and not after.startswith("||")
+                    data = bool(m.group(2) or m.group(3)) and _heredoc_is_data(
+                        line[start:k] + " " + tail, piped, [e[2] for e in stack])
+                    found.append((m.group(1) == "-", m.group(2) or m.group(3) or m.group(4), data))
                     k = m.end()
                     continue
             k += 1
-        for tabs, literal, plain in found:
-            delim = literal or plain
-            start = i
+        for tabs, delim, data in found:
+            body = i
             while i < len(lines) and (lines[i].lstrip("\t") if tabs else lines[i]) != delim:
                 i += 1
-            if not literal:
-                out.extend(lines[start:i])
+            if not data:
+                out.extend(lines[body:i])
             if i < len(lines):
                 out.append(lines[i])
                 i += 1
@@ -1021,7 +1356,7 @@ def scan_writes(cmd, state, depth=0):
         return ("ask", "シェルの入れ子が深すぎるため確認が必要")
     cmd = strip_literal_heredocs(cmd)
     # 置換（$(…)・`…`・変数）を含む cd はセグメント分割で引数が欠けるため、コマンド内の cd 全体を確定不可にする
-    dynamic_cd = bool(re.search(r"(^|[\s;&|({!])(cd|pushd)\s[^;&|\n]*[$`]", cmd))
+    dynamic_cd = bool(ordered_search(((r"(^|[\s({!])(cd|pushd)\s", r"[$`]"), r"[;&|\n]"), cmd))
     for joined, pieces in _logical_segments(cmd):
         # クォートをまたぐ連結は、断片単位（$(…) 内の cd・書き込み）と連結全体の両方で判定する
         for seg in (pieces + [joined] if len(pieces) > 1 else [joined]):
@@ -1058,6 +1393,9 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     seen_find = False
     safe_finds = True
     cwd_known = True
+    # 長すぎる入力は正規表現の判定前に確認へ回す（C 実装の検索中は期限切れで止められず、hook timeout で未判定実行になる）
+    if len(cmd) > BASH_MAX_CHARS:
+        return ("ask", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）ため確認が必要")
     # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
     # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
     write_hit = None
@@ -1070,14 +1408,14 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     # 認証情報ファイルの読み取り禁止
     if SECRET_WORDS.search(cmd):
         return ("deny", "認証情報ファイルへのアクセスは禁止")
-    if re.search(r"\baws\b.*--with-decryption\b", cmd):
+    if ordered_search(((r"\baws\b", r"--with-decryption\b"), "\n"), cmd):
         return ("deny", "復号した秘密情報の取得は禁止")
 
     for pat in CRED_BYPASS + (PROFILE_BYPASS if AWS_ENABLED else []):
-        if re.search(pat, cmd):
+        if ordered_search(pat, cmd):
             return ("deny", "AWS 認証情報/プロファイルの差し替えは禁止（AI は設定したプロファイル固定）")
     for pat in DEPLOY_PATTERNS:
-        if re.search(pat, cmd):
+        if ordered_search(pat, cmd):
             return ("deny", "AWS へのデプロイ/削除系コマンドは禁止。デプロイはユーザーが実行する")
     r = check_harness_exec(cmd, cwd)
     if r == "allow":
@@ -1191,18 +1529,19 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
         return decisions[0]
 
     for pat in INLINE_DELETE:
-        m = re.search(pat, cmd)
-        if m:
+        found = ordered_search(pat, cmd)
+        if found:
             # find は全起点が一時領域配下かつリンク追跡なしの場合のみ承認不要。
-            if pat.startswith(r"\bfind") and (find_in_temp(cmd) or (seen_find and safe_finds)):
+            first = pat if isinstance(pat, str) else pat[0][0]
+            if first.startswith(r"\bfind") and (find_in_temp(cmd) or (seen_find and safe_finds)):
                 continue
-            return ("ask", f"削除を伴う可能性のある操作: {m.group(0)}")
+            return ("ask", f"削除を伴う可能性のある操作: {found[:200]}")
 
     # 保護ファイルへの書き込み（リダイレクト・sed -i・tee・cp・mv など）をセグメント単位で判定
     for seg in split_segments(cmd):
         # /dev/null への出力捨て・fd 複製（2>/dev/null・>&2 等）は書き込みではない
-        seg = re.sub(r"\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|\d*>&\d+", " ", seg)
-        if any(w in seg for w in PROTECTED_WRITE_WORDS) and WRITE_RE.search(seg):
+        seg = DEVNULL_RE.sub(" ", seg)
+        if any(w in seg for w in PROTECTED_WRITE_WORDS) and is_write_text(seg):
             return ("ask", "ガード設定/認証関連ファイルの変更を含むコマンド")
     # 相対パス・cd 後の書き込み対象を実行ディレクトリ基準で解釈した判定
     return write_hit

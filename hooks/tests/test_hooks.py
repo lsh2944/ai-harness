@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -508,6 +509,8 @@ class RelativeWriteTests(unittest.TestCase):
             h + '/.githooks', h + '/tools/privacy_check.py', h + '/tools/harness_setup.py', h + '/setup.sh'])
         cls.guard_path = env.isolated_guard(cls.config)
         cls.g = env.load(cls.guard_path, 'guard_relative')
+        # ハーネス外の作業ディレクトリ
+        cls.other = Path(tempfile.mkdtemp(prefix='project-', dir=env.HOME.parent)).resolve()
 
     def check(self, cases, cwd, guard=None):
         guard = guard or self.g
@@ -625,6 +628,129 @@ class RelativeWriteTests(unittest.TestCase):
                        str(self.home), linked)
             self.assertEqual(linked.check_edit(str(self.home / 'hooks/guard.py'))[0], 'ask')
             self.assertIsNone(linked.check_edit(str(self.home / 'docs/x.md')))
+
+    def test_copy_and_link_check_destination_only(self):
+        self.check([
+            # cp・ln・install・rsync は宛先だけ、mv は移動元と宛先の両方
+            ('cp hooks/guard.py /tmp/x', None),
+            ('cp -r hooks /tmp/backup', None),
+            ('cp /tmp/x hooks/guard.py', 'ask'),
+            ('cp -t hooks /tmp/x', 'ask'),
+            ('cp --target-directory=hooks /tmp/x', 'ask'),
+            ('ln -s hooks/guard.py /tmp/link', None),
+            ('ln -sf /tmp/x hooks/guard.py', 'ask'),
+            ('cd hooks && ln -s /tmp/x/guard.py', 'ask'),
+            ('mv hooks/guard.py /tmp/x', 'ask'),
+            ('install -m 644 /tmp/x hooks/guard.py', 'ask'),
+            ('install -m 644 hooks/guard.py /tmp/x', None),
+            ('install -d hooks/new', 'ask'),
+            ('rsync -a /tmp/x/ hooks/', 'ask'),
+            ('rsync -a hooks/ /tmp/b/', None),
+            ('rsync -a hooks/ host:/b/', None),
+            # find -exec cp など書き込みコマンドが引数側にあるものは従来どおり全語を対象
+            ('find /tmp -name x -exec cp {} hooks/ +', 'ask'),
+        ], str(self.home))
+
+    def test_added_write_commands(self):
+        h = str(self.home)
+        self.check([
+            ('dd if=/tmp/x of=hooks/guard.py', 'ask'),
+            ('dd if=hooks/guard.py of=/tmp/x', None),
+            ('curl -sSLo hooks/guard.py https://example.com/x', 'ask'),
+            ('curl --output=tools/privacy_check.py https://example.com/x', 'ask'),
+            ('curl -s https://example.com/hooks/guard.py -o /tmp/x', None),
+            ('wget -O hooks/guard.py https://example.com/x', 'ask'),
+            ('wget -O /tmp/x https://example.com/hooks/guard.py', None),
+            ('patch -p1 < /tmp/x.patch', 'ask'),
+            ('git apply /tmp/x.patch', 'ask'),
+            ('git checkout -- hooks/guard.py', 'ask'),
+            ('git restore .', 'ask'),
+            ('git stash', 'ask'),
+            ('git apply --check /tmp/x.patch', None),
+            ('git stash list', None),
+            ('git status', None),
+            ('git -C /tmp/other-repo apply /tmp/x.patch', None),
+            ('tar -xzf /tmp/a.tgz -C hooks', 'ask'),
+            ('tar xzf /tmp/a.tgz -C tools/aws', 'ask'),
+            ('unzip /tmp/a.zip -d hooks', 'ask'),
+            ('tar -czf /tmp/a.tgz hooks', None),
+            ('tar -xzf /tmp/a.tgz', None),
+            ('unzip -o /tmp/a.zip', None),
+        ], h)
+        self.check([('tar -xzf /tmp/a.tgz', 'ask'), ('unzip /tmp/a.zip', 'ask'), ('unzip -l /tmp/a.zip', None)],
+                   h + '/hooks')
+        # ハーネス外の作業ディレクトリでは展開・パッチ・git は従来どおり
+        other = str(self.other)
+        self.check([('patch -p1 < /tmp/x.patch', None), ('git stash', None), ('tar -xzf /tmp/a.tgz', None),
+                    (f'git -C {h} stash', 'ask'), (f'patch -d {h}/docs -p1 < /tmp/x.patch', 'ask')], other)
+
+    def test_moving_or_changing_protected_ancestors(self):
+        h = str(self.home)
+        parent, name = os.path.split(h)
+        self.check([
+            (f'mv {h} /tmp/x', 'ask'),
+            (f'chmod -R u+w {h}', 'ask'),
+            (f'ln -sfn /tmp/x {h}', 'ask'),
+            (f'mv {h}/docs /tmp/d', None),
+            (f'chmod 755 {h}/docs', None),
+            (f'chmod -R go-w {h}/docs', None),
+        ], str(self.other))
+        self.check([(f'mv {name} x', 'ask'), (f'chmod -R 700 {name}', 'ask')], parent)
+        self.check([('chmod -R go-w .', 'ask'), ('chmod -w hooks/guard.py', 'ask'), ('chmod 644 docs/x.md', None)], h)
+
+    def test_unexpanded_variables_in_harness(self):
+        h = str(self.home)
+        self.check([
+            ('echo x > $D/guard.py', 'ask'),
+            ("sed -i '' 's/a/b/' $F", 'ask'),
+            ('cp /tmp/x "$T"', 'ask'),
+            ('tar -xzf /tmp/a.tgz -C $D', 'ask'),
+            # スクリプト中の $ はパスではない
+            ("sed -i '' 's/a$/b/' docs/x.md", None),
+            ('echo "$X" > /tmp/x', None),
+        ], h)
+        self.check([('echo x > $D/guard.py', None), ('cp /tmp/x "$T"', None),
+                    (f'cd {h}/docs; echo x > $D/a', 'ask')], str(self.other))
+
+    def test_heredoc_body_exemption_depends_on_consumer(self):
+        self.check([
+            # 本文を実行し得るコマンド・パイプで渡す場合は本文も判定する
+            ("source /dev/stdin <<'X'\necho x > hooks/guard.py\nX", 'ask'),
+            (". /dev/stdin <<'X'\ncp /tmp/x hooks/guard.py\nX", 'ask'),
+            ("cat <<'X' | tee /tmp/y\necho x > hooks/guard.py\nX", 'ask'),
+            ("bash -c \"$(cat <<'X'\necho x > hooks/guard.py\nX\n)\"", 'ask'),
+            # 注釈中の << は heredoc ではない
+            ("cat /tmp/a # <<'X'\necho x > hooks/guard.py\nX", 'ask'),
+            # データとしてだけ使う heredoc（$'…' を含む行も正しく読む）
+            ("git tag -a v1 -F - <<'EOF'\ncp x hooks/guard.py\nEOF", None),
+            ("git commit --file=- <<'EOF'\necho x > hooks/guard.py\nEOF", None),
+            ("tee /tmp/y <<'EOF'\ncp x hooks/guard.py\nEOF", None),
+            ("cat $'a\\'b' > /tmp/o <<'X'\ncp x hooks/guard.py\nX", None),
+        ], str(self.home))
+
+    def test_long_commands_are_bounded(self):
+        # 上限超過は判定前に承認（Codex は拒否）
+        long = 'echo ' + 'a' * (self.g.BASH_MAX_CHARS + 1)
+        self.assertEqual(self.g.check_bash(long, cwd=str(self.home))[0], 'ask')
+        payload = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': long}, 'cwd': str(self.home)})
+        for runtime, expected in (('claude', 'ask'), ('codex', 'deny')):
+            result = run_guard(payload, runtime, guard=self.guard_path)
+            self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], expected)
+        # 上限以下でも二乗時間の後戻りにならない入力（正規表現は C 実装で期限切れの割り込みが効かない）
+        limit = self.g.BASH_MAX_CHARS
+        for unit in ('find ', 'cd ', 'sed ', 'perl ', 'python ', 'unset ', 'xargs ', 'rsync ', 'greengrass-cli ',
+                     '1', ','):
+            text = (unit * (limit // len(unit)))[:limit - 10]
+            for name, function in (('ordered', lambda t: [self.g.ordered_search(p, t) for p in
+                                                          self.g.INLINE_DELETE + self.g.PROFILE_BYPASS
+                                                          + self.g.DEPLOY_PATTERNS + list(self.g.WRITE_ORDERED)]),
+                                   ('devnull', lambda t: self.g.DEVNULL_RE.sub(' ', t)),
+                                   ('write', self.g.is_write_text),
+                                   ('brace', lambda t: self.g.brace_expand('{' + t))):
+                with self.subTest(unit=unit, check=name):
+                    started = time.monotonic()
+                    function(text)
+                    self.assertLess(time.monotonic() - started, 1.0)
 
     def test_without_cwd_uses_protected_names(self):
         cases = [
