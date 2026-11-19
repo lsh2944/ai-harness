@@ -31,7 +31,8 @@ quote() {
 install=$(quote "$root/install/install.py")
 config=$(quote "$root/config.local.json")
 echo "반영하려면 터미널에서 직접 실행하세요(<python>은 config.local.json의 python 값, null이면 venv가 아닌 python3):"
-echo "  확인(dry-run): <python> $install --config $config"
-echo "  적용:          <python> $install --config $config --apply   (확인 문구에 apply 입력)"
+# パスを含む行は printf '%s\n' で出す（dash の echo は \ を解釈するため）
+printf '%s\n' "  확인(dry-run): <python> $install --config $config"
+printf '%s\n' "  적용:          <python> $install --config $config --apply   (확인 문구에 apply 입력)"
 echo "  AWS 모듈을 쓰는 경우 두 명령 모두 --with-aws 를 붙입니다."
 exit 0

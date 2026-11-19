@@ -382,6 +382,17 @@ class GitHookTests(Fixture):
         self.assertNotIn('DRY-RUN:', out)
         self.assertFalse((self.home / '.claude').exists(), 'post-merge must not write HOME')
 
+    @unittest.skipUnless(shutil.which('dash'), 'dash not installed')
+    def test_post_merge_keeps_backslash_in_paths_under_dash(self):
+        odd = self.base / 'with\\tback'
+        self.git(self.base, 'clone', '-q', str(self.origin), str(odd))
+        (odd / 'config.local.json').write_text('{}')
+        self.origin_commit('agents/y.md', 'y\n')
+        self.git(odd, '-c', 'core.hooksPath=/dev/null', 'pull', '-q', '--ff-only')
+        result = subprocess.run(['dash', str(odd / '.githooks/post-merge')], cwd=odd, env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertIn(f"'{odd.resolve()}/install/install.py'", result.stdout)
+
     def test_post_merge_with_placeholder_aws_asks_for_edit(self):
         example = json.loads((self.clone / 'config.example.json').read_text())
         self.write_config(aws=example['aws'])
