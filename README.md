@@ -13,9 +13,9 @@ Claude Code와 Codex에 공통으로 쓰는 작업 지침·가드 hook·설정 �
 | `settings/` | 병합 조각. `claude.settings*.json`(권한·자동 모드 규칙·출력 상한 등), `codex.config*.toml`(Codex 기본값·덮어쓸 값·환경변수 제외 목록), `mcp*.json`(MCP 버전 고정·aws-api env) |
 | `agents/` | 공용 서브에이전트 `code-reviewer`·`architect`·`troubleshooter`·`script-feature`와 영역별 구현 에이전트 견본 `feature-template.md` |
 | `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev`(AWS 모듈) |
-| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh·post-merge 보조) |
+| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh 보조) |
 | `setup.sh` | 새 컴퓨터 초기 설정(Mac/Linux). 아래 "새 컴퓨터 설정" 참고 |
-| `.githooks/` | 저장소 git hook. `pre-commit`(개인정보 검사), `post-merge`(pull 후 반영 알림) |
+| `.githooks/` | 저장소 git hook. `pre-commit`·`commit-msg`(개인정보 검사), `post-merge`(pull 후 반영 알림) |
 
 ## 새 컴퓨터 설정(Mac/Linux)
 
@@ -56,13 +56,13 @@ cd ai-harness
 
 1. 이 저장소에만 쓰는 커밋 작성자(`git config --local user.name`·`user.email`)가 없으면 입력받는다. 전역 git 설정은 바꾸지 않는다. 메일은 `<개인 메일>` 또는 GitHub noreply 메일(`<ID>+<GitHub 사용자명>@users.noreply.github.com`)을 쓴다.
 2. `git config --local core.hooksPath .githooks`를 설정한다(다른 값이 이미 있으면 바꿀지 묻는다).
-3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
-4. `install.py` dry-run 요약(`SAME`은 생략)을 보여 준다. 변경이 없으면 여기서 끝난다. `--with-aws`는 `config.local.json`에 `aws` 절이 있으면 붙인다.
+3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. `extra_protected_paths`에는 이 clone의 `.githooks`·`tools/privacy_check.py`·`tools/harness_setup.py`·`setup.sh` 절대 경로가 들어간다. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
+4. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한 뒤 `install.py` dry-run 요약(`SAME`은 생략)을 보여 준다. 변경이 없으면 여기서 끝난다. `--with-aws`는 `config.local.json`에 `aws` 절(object)이 있으면 붙인다. `aws`가 `null` 등 object가 아니거나 `AWS`처럼 대소문자만 다른 키가 있으면 오류로 멈춘다(AWS를 쓰지 않으려면 키를 지운다).
 5. 적용할지 묻고, `y`면 `install.py --apply`를 실행한다. 이어서 install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다.
 
 ### ⑤ 이후 커밋·push
 
-- 커밋하면 pre-commit hook이 개인정보 검사를 실행한다(아래 "git hook").
+- 커밋하면 pre-commit·commit-msg hook이 파일과 커밋 메시지의 개인정보 검사를 실행한다(아래 "git hook").
 - `git push origin main`은 저장된 토큰으로 인증된다.
 
 ### 문제 해결(인증)
@@ -85,11 +85,15 @@ Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다
 
 `setup.sh`가 `core.hooksPath`를 설정한 저장소에서만 동작한다. 수동 설정: `git config --local core.hooksPath .githooks`.
 
-- **pre-commit**: `python3 tools/privacy_check.py --staged`로 index의 추가·수정 파일을 검사한다. 12자리 AWS 계정 ID·IAM ARN·이메일·AWS 액세스 키·GitHub 토큰·`sk-` 키·PRIVATE KEY 헤더·`/Users/<이름>/`·`/home/<이름>/` 경로·현재 사용자의 HOME 경로와 `privacy_words`를 찾으면 `파일:행: 종류(값 일부 마스킹)`를 출력하고 커밋을 막는다. 바이너리·1MiB 초과 파일은 `SKIP`으로 표시하고 건너뛴다. 커밋 메시지·작성자 정보는 검사하지 않는다.
-  - 오탐이면 `tools/privacy_check.py`의 패턴·허용 목록을 고친다(허용 목록은 최소한으로 두고 근거를 주석으로 남긴다). 테스트용 값은 소스에 그대로 쓰지 말고 실행 시 문자열을 이어 붙여 만든다.
+- **pre-commit**: `python3 tools/privacy_check.py --staged`로 index의 삭제 외 모든 변경 파일(추가·수정·이름 변경·타입 변경, 심볼릭 링크는 대상 문자열)을 검사한다. 12자리 AWS 계정 ID·IAM ARN·이메일·AWS 액세스 키·GitHub 토큰·`sk-` 키·PRIVATE KEY 헤더·`/Users/<이름>`·`/home/<이름>` 경로·현재 사용자의 HOME 경로와 `privacy_words`를 찾으면 `파일:행: 종류(값 일부 마스킹)`를 출력하고 커밋을 막는다.
+  - 크기 상한은 없다(1MiB 단위로 읽어 줄 단위로 검사). BOM 있는 UTF-8/16/32는 디코드해 검사한다. 앞부분에 NUL이 있는 바이너리(BOM 없는 UTF-16 포함)는 검사할 수 없으므로 `SKIP`으로 표시하고 **커밋을 막는다**. 내용을 확인한 뒤 `--no-verify` 사용 여부는 사용자가 결정한다.
+  - `privacy_words`가 없으면 "고유명사 검사는 privacy_words 설정 시에만"이라는 알림이 한 줄 나온다(차단하지 않음).
+  - 오탐이면 **사용자 확인을 받은 뒤** `tools/privacy_check.py`의 패턴·허용 목록을 고친다(허용 목록은 최소한으로 두고 근거를 주석으로 남긴다). 테스트용 값은 소스에 그대로 쓰지 말고 실행 시 문자열을 이어 붙여 만든다.
   - `git commit --no-verify`로 건너뛸 수 있지만 우회 여부는 사용자가 판단한다.
-  - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용).
-- **post-merge**: `git pull`(merge·fast-forward) 후 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 목록을 알리고, `config.local.json`이 있으면 그 `python`(없으면 `python3`)으로 install.py dry-run 요약과 적용 명령을 보여 준다. 적용은 하지 않는다. `config.local.json`이 없으면 `./setup.sh` 실행을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
+  - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용. 바이너리가 있으면 종료 코드 1).
+- **commit-msg**: `python3 tools/privacy_check.py --message <파일>`로 커밋 메시지(주석 줄·`commit -v`의 scissors 아래 제외)를 같은 패턴으로 검사해 검출 시 막는다. `Co-Authored-By`의 `noreply@anthropic.com`은 허용. 커밋 작성자(user.email) 정보는 검사하지 않는다.
+- **post-merge**: `git pull`(merge·fast-forward) 후 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 목록과, 사용자가 터미널에서 실행할 install.py dry-run·적용 명령(절대 경로, AWS 모듈 사용 시 `--with-aws`)을 **출력만** 한다. Python·install.py를 실행하지 않는다. `config.local.json`이 없으면 `./setup.sh`, aws 절이 견본 값이면 편집을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
+- 이 hook들과 검사기·`setup.sh`·`tools/harness_setup.py`를 바꾸거나 `core.hooksPath`를 바꾸는 것은 커밋 전에 사용자 확인을 받는다(CLAUDE.md). `setup.sh`가 새로 만드는 `config.local.json`은 이 경로들을 `extra_protected_paths`에 넣어 가드가 수정 시 승인을 요구하게 한다. **이미 `config.local.json`이 있는 컴퓨터**는 clone 절대 경로 기준 `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh`를 `extra_protected_paths`에 직접 추가한 뒤 터미널에서 `install.py ... --apply`를 다시 실행해야 반영된다.
 
 ## 설정 작성
 
@@ -112,7 +116,7 @@ cp config.example.json config.local.json
 | `aws.assume_role_cmd` | `{{ASSUME_ROLE_CMD}}` | 인증 갱신 스크립트 절대 경로. 예: `tools/aws/assume_role.sh` |
 | `aws.assume_role_envs` | `{{AWS_ENVS}}`(쉼표 목록) | 가드가 `--awsEnv <이름>` 실행을 허용할 환경 이름 |
 | `aws.roles`, `aws.mfa_serial` | — | `tools/aws/assume_role.py`가 쓰는 환경별 역할 ARN과 MFA 장치 ARN |
-| `privacy_words` | — | 선택. pre-commit 개인정보 검사에 더할 사용자별 단어 목록(실명·회사 도메인 등, 대소문자 무시). install.py는 이 키를 쓰지 않는다 |
+| `privacy_words` | — | 선택. pre-commit·commit-msg 개인정보 검사에 더할 사용자별 단어 목록(실명·회사 도메인 등, 대소문자 무시). install.py는 이 키를 쓰지 않는다 |
 
 install.py가 내부에서 계산하는 변수: `{{SKILL_DIR}}`(설치된 각 스킬 폴더), `{{AWS_MCP_TOOLS}}`(`--with-aws`면 에이전트 tools에 aws-api MCP 도구를 붙이고 아니면 빈 문자열). 마크다운의 `<!-- BEGIN aws -->`~`<!-- END aws -->` 블록은 `--with-aws`일 때만 남는다. 치환되지 않은 `{{...}}`가 남으면 설치를 중단한다.
 
@@ -143,7 +147,7 @@ python3 install/install.py --config config.local.json [--target ...] [--with-aws
 
 ## 갱신
 
-저장소를 갱신(`git pull` 등)한 뒤 같은 명령으로 dry-run → `--apply`를 다시 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부와 dry-run 요약을 알려 준다). 변경이 없으면 모든 항목이 `SAME`으로 나온다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
+저장소를 갱신(`git pull` 등)한 뒤 같은 명령으로 dry-run → `--apply`를 다시 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부와 실행할 명령을 알려 준다). 변경이 없으면 모든 항목이 `SAME`으로 나온다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
 
 ## 테스트
 
