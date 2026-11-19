@@ -123,6 +123,32 @@ def _protected_write():
 
 PROTECTED_WRITE, PROTECTED_WRITE_WORDS = _protected_write()
 
+
+_PROTECTED_ENTRIES_CACHE = {}
+
+
+def _protected_entries():
+    """保護パスを (基準パス, ディレクトリか) で字句・実体の両方について列挙する（保護パス自体がリンクの場合も含む）。
+    PROTECTED_WRITE の内容ごとにキャッシュする（実体パス解決の繰り返しを避ける）。"""
+    key = tuple(PROTECTED_WRITE)
+    if key not in _PROTECTED_ENTRIES_CACHE:
+        entries = []
+        for prot in key:
+            base = os.path.normpath(prot)
+            for b in dict.fromkeys((base, os.path.realpath(base))):
+                entries.append((b, prot.endswith("/")))
+        _PROTECTED_ENTRIES_CACHE[key] = tuple(entries)
+    return _PROTECTED_ENTRIES_CACHE[key]
+
+
+def is_protected_write(path):
+    """絶対パスが改変承認の対象（保護パス配下・任意プロジェクトの .claude/settings*）なら True。"""
+    for base, is_dir in _protected_entries():
+        # ディレクトリはそれ自体（mv・cp の宛先）と配下、それ以外は従来どおり前方一致
+        if (path == base or path.startswith(base + "/")) if is_dir else path.startswith(base):
+            return True
+    return bool(re.search(r"/\.claude/settings[^/]*$", path))
+
 # 読み取り禁止の秘密情報。~/.aws は許可リスト方式（config と MCP ログ以外は不可）。
 AWS_DIR = os.path.join(HOME, ".aws")
 AWS_READABLE_FILES = (os.path.join(AWS_DIR, "config"),)
@@ -743,11 +769,300 @@ def check_harness_exec(cmd, cwd):
     return ("ask", "認証更新スクリプトは登録済み環境名での単独実行のみ許可（変数代入・ラッパー・他コマンド併用は確認が必要）")
 
 
-def check_bash(cmd, depth=0, cwd=None):
+# Bash の書き込み判定。リダイレクトと、対象ファイルを書き換えるコマンド。
+REDIRECT_RE = r">\s*[^&\s]|>&\s*[^\d\s&-]"
+WRITE_CMD_RE = re.compile(r"\btee\b|\bsed\b[^;&|]*\s(-[A-Za-z]*i|--in-place)|\bcp\b|\bmv\b|\bchmod\b|\bln\b|"
+                          r"\bperl\b[^;&|]*\s-[A-Za-z]*i|\bpython3?\b.*(open|write|dump)|\btruncate\b")
+WRITE_RE = re.compile(REDIRECT_RE + "|" + WRITE_CMD_RE.pattern)
+# hook 入力に cwd がないとき、相対パスの書き込み対象がこの名前（パス要素単位）を含めば承認対象にする
+FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
+                            "privacy_check.py", "harness_setup.py", "setup.sh")
+# cd 先として字句的に確定できる引数（変数・置換・クォート・ワイルドカードを含まない）
+CD_TARGET_RE = re.compile(r"[\w./~+@%,:=-]+")
+# サブシェル・グループ・制御構文の先頭語（直後の cd を検出するため読み飛ばす）
+SHELL_LEADERS = {"(", "{", "!", "if", "then", "else", "elif", "do", "while", "until"}
+WRITE_CWD_LIMIT = 32
+
+
+class WriteState:
+    """Bash 書き込み判定用の実行ディレクトリ候補。
+    サブシェル・pushd/popd を正確に追わず、cd 先を候補に加え続ける（どの候補で解釈しても保護対象なら承認）。
+    nobase: hook 入力に cwd がない（相対パスは保護名で判定）。unknown: cd 先が確定できない（相対パスの書き込みは承認）。"""
+
+    def __init__(self, dirs=(), nobase=False):
+        self.dirs = list(dict.fromkeys(os.path.normpath(d) for d in dirs))
+        self.nobase = nobase or not self.dirs
+        self.unknown = False
+        self.pushed = False
+        self.pending_redirect = False
+        self.cache = {}  # (語, 基準ディレクトリ) → 判定。複製間で共有する
+
+    def copy(self):
+        other = WriteState()
+        other.__dict__.update(self.__dict__, dirs=list(self.dirs))
+        return other
+
+
+def _shell_words(seg):
+    """リダイレクト演算子を独立した語にして分割する（クォート内の > は語の一部のまま）。失敗時は None。"""
+    try:
+        lexer = shlex.shlex(seg, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _update_write_cwd(state, seg, dynamic_cd):
+    """cd・pushd・popd を実行ディレクトリ候補に反映する（eval 内の cd は scan_writes が同じ候補で走査する）。"""
+    try:
+        toks = shlex.split(seg)
+    except ValueError:
+        # クォートがセグメントをまたぐ断片（sh -c 'cd x; …' の先頭など）はクォート記号を外して読む
+        toks = [t.strip("'\"") for t in seg.split()]
+    while toks and (toks[0] in SHELL_LEADERS or toks[0].startswith("(")):
+        if toks[0] != "(" and toks[0].startswith("("):
+            toks[0] = toks[0].lstrip("(")
+        else:
+            toks.pop(0)
+    _, argv = strip_prefix(toks)
+    if not argv:
+        return
+    prog = os.path.basename(argv[0])
+    if prog == "popd":
+        # このコマンド内の pushd 以前の位置はすでに候補にある。それ以外はディレクトリスタック次第
+        if not state.pushed:
+            state.unknown = True
+        return
+    if prog not in ("cd", "pushd"):
+        return
+    args = argv[1:]
+    while prog == "cd" and args and args[0] in ("-P", "-L", "-e", "-@"):
+        args = args[1:]
+    if args[:1] == ["--"]:
+        args = args[1:]
+    # 引数なし（HOME・ディレクトリスタック）・cd -・置換を含む cd は移動先を確定できない
+    if dynamic_cd or len(args) != 1 or args[0].startswith("-") or not CD_TARGET_RE.fullmatch(args[0]):
+        state.unknown = True
+        return
+    state.pushed = state.pushed or prog == "pushd"
+    target = os.path.expanduser(args[0])
+    if target.startswith("~"):
+        state.unknown = True
+        return
+    # 追加中のリストを走査しないよう複製を使う
+    bases = [""] if os.path.isabs(target) else list(state.dirs)
+    for base in bases:
+        joined = os.path.join(base, target)
+        for d in (os.path.normpath(joined), os.path.realpath(joined)):
+            if d not in state.dirs:
+                state.dirs.append(d)
+    if len(state.dirs) > WRITE_CWD_LIMIT:
+        state.unknown = True
+
+
+def _write_candidates(seg, state):
+    """書き込み系セグメントの対象候補文字列と、先頭のコマンド名を返す。書き込み系でなければ None。"""
+    clean = re.sub(r"\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|\d*>&\d+", " ", seg)
+    pending = state.pending_redirect
+    # `>|` はセグメント分割で切れるため、次のセグメントの先頭語をリダイレクト先として扱う
+    state.pending_redirect = clean.rstrip().endswith(">")
+    command_write = WRITE_CMD_RE.search(clean)
+    if not (pending or command_write or re.search(REDIRECT_RE, clean)):
+        return None
+    words = _shell_words(clean)
+    _, argv = strip_prefix(tokens(clean))
+    # `>|` の続きのセグメントは先頭語がリダイレクト先なのでコマンド名として除外しない
+    name = argv[0] if argv and not pending else None
+    if words is None:
+        # 字句解析できない場合は演算子・クォート記号で区切ったすべての語を対象にする（安全側）
+        parts = re.split(r"[<>&|;()'\"\s]+", clean)
+        return [p for p in parts if p], name
+    found = [words[0]] if pending and words else []
+    skip = False
+    for n, w in enumerate(words):
+        if skip:
+            skip = False
+            continue
+        operator = bool(w) and all(c in "();<>|&" for c in w)
+        if operator:
+            # 入力リダイレクト・heredoc の語は読み取り元なので除き、出力リダイレクトの語は対象にする
+            if "<" in w and ">" not in w:
+                skip = True
+            elif ">" in w and n + 1 < len(words):
+                found.append(words[n + 1])
+                skip = True
+            continue
+        if command_write:
+            found.append(w)
+            # python -c・perl -e 等のコード中の文字列リテラルもパスとして扱う
+            found += [a or b for a, b in re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", w)]
+    out = []
+    for w in found:
+        for v in (w, w.split("=", 1)[-1]):
+            if v and not v.startswith("-") and v not in out:
+                out.append(v)
+    return out, name
+
+
+def check_protected_write(seg, state):
+    """セグメントの書き込み対象を実行ディレクトリ候補で絶対パス・実体パスにし、保護パスと比較する。"""
+    result = _write_candidates(seg, state)
+    if not result:
+        return None
+    candidates, name = result
+    for value in candidates:
+        expanded = os.path.expandvars(os.path.expanduser(value))
+        if os.path.isabs(expanded):
+            bases = ["/"]
+        else:
+            if value == name:
+                continue
+            if state.unknown:
+                return ("ask", f"実行ディレクトリが確定できないため相対パスの書き込みは確認が必要: {seg[:200]}")
+            if state.nobase:
+                padded = "/" + os.path.normpath(expanded) + "/"
+                if any("/" + n.rstrip("/") + "/" in padded for n in FALLBACK_PROTECTED_NAMES):
+                    return ("ask", f"ガード設定/認証関連ファイルの変更を含む可能性: {value[:200]}")
+            bases = state.dirs
+        for base in bases:
+            key = (value, base)
+            if key not in state.cache:
+                # heredoc 等で同じ語が繰り返されるため、実体パス解決の結果をコマンド内で再利用する
+                paths = path_variants(value, base)
+                state.cache[key] = ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要") if paths is None else next(
+                    (("ask", f"ガード設定/認証関連ファイルの変更: {p}") for p in paths if is_protected_write(p)), None)
+            if state.cache[key]:
+                return state.cache[key]
+    return None
+
+
+def _logical_segments(cmd):
+    """split_segments の断片を、クォートが閉じるまで連結した論理セグメントにする。
+    (連結後の文字列, 構成断片) を返す。クォート内の ; | && で切れた sh -c・python -c を一体で読むため。"""
+    out, buf, quote = [], [], None
+    for piece in split_segments(cmd):
+        buf.append(piece)
+        # クォート状態を断片ごとに追跡する（連結文字列の再解析を繰り返さず線形時間に保つ）
+        k = 0
+        while k < len(piece):
+            c = piece[k]
+            if quote == "'":
+                quote = None if c == "'" else quote
+            elif c == "\\":
+                k += 1
+            elif quote == '"':
+                quote = None if c == '"' else quote
+            elif c in "'\"":
+                quote = c
+            k += 1
+        if quote is None:
+            out.append((" ; ".join(buf), buf))
+            buf = []
+    if buf:
+        out.append((" ; ".join(buf), buf))
+    return out
+
+
+HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([A-Za-z0-9_.-]+)'|\"([A-Za-z0-9_.-]+)\"|([A-Za-z0-9_.-]+))")
+
+
+def strip_literal_heredocs(cmd):
+    """区切りをクォートした heredoc（<<'EOF'）の本文を除く。本文は展開・実行されないデータのため。
+    クォート外の << だけを対象にし（$(…) 内はクォート文脈を戻す）、区切りが未クォートの本文は残す。"""
+    lines = cmd.split("\n")
+    out, i, quote, stack = [], 0, None, []
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        found, k = [], 0
+        while k < len(line):
+            c = line[k]
+            if quote == "'":
+                quote = None if c == "'" else quote
+            elif c == "\\":
+                k += 1
+            elif line.startswith("$(", k):
+                stack.append(quote)
+                quote = None
+                k += 1
+            elif quote == '"':
+                quote = None if c == '"' else quote
+            elif c in "'\"":
+                quote = c
+            elif c == "(":
+                stack.append(None)
+            elif c == ")" and stack:
+                quote = stack.pop()
+            elif line.startswith("<<", k) and not line.startswith("<<<", k):
+                m = HEREDOC_RE.match(line, k)
+                if m:
+                    found.append((m.group(1) == "-", m.group(2) or m.group(3), m.group(4)))
+                    k = m.end()
+                    continue
+            k += 1
+        for tabs, literal, plain in found:
+            delim = literal or plain
+            start = i
+            while i < len(lines) and (lines[i].lstrip("\t") if tabs else lines[i]) != delim:
+                i += 1
+            if not literal:
+                out.extend(lines[start:i])
+            if i < len(lines):
+                out.append(lines[i])
+                i += 1
+    return "\n".join(out)
+
+
+def scan_writes(cmd, state, depth=0):
+    """コマンド全体の書き込み対象を cd・sh -c・eval を反映した実行ディレクトリ候補で判定する。最初の該当を返す。"""
+    if depth > 4:
+        return ("ask", "シェルの入れ子が深すぎるため確認が必要")
+    cmd = strip_literal_heredocs(cmd)
+    # 置換（$(…)・`…`・変数）を含む cd はセグメント分割で引数が欠けるため、コマンド内の cd 全体を確定不可にする
+    dynamic_cd = bool(re.search(r"(^|[\s;&|({!])(cd|pushd)\s[^;&|\n]*[$`]", cmd))
+    for joined, pieces in _logical_segments(cmd):
+        # クォートをまたぐ連結は、断片単位（$(…) 内の cd・書き込み）と連結全体の両方で判定する
+        for seg in (pieces + [joined] if len(pieces) > 1 else [joined]):
+            r = check_protected_write(seg, state)
+            if r:
+                return r
+            _update_write_cwd(state, seg, dynamic_cd)
+        try:
+            toks = shlex.split(joined)
+        except ValueError:
+            continue
+        while toks and toks[0] in SHELL_LEADERS:
+            toks.pop(0)
+        _, argv = strip_prefix(toks)
+        prog = os.path.basename(argv[0]) if argv else ""
+        if prog in ("sh", "bash", "zsh", "dash", "ksh"):
+            ci = next((i for i, a in enumerate(argv[1:], 1)
+                       if a.startswith("-") and "c" in a[1:] and not a.startswith("--")), None)
+            if ci is not None and ci + 1 < len(argv):
+                # 子シェルの cd は呼び出し側に影響しないため複製で走査する
+                r = scan_writes(argv[ci + 1], state.copy(), depth + 1)
+                if r:
+                    return r
+        elif prog == "eval":
+            # eval は同じシェルで再解釈されるため、cd も含めて同じ候補で走査する
+            r = scan_writes(" ".join(argv[1:]), state, depth + 1)
+            if r:
+                return r
+    return None
+
+
+def check_bash(cmd, depth=0, cwd=None, write_state=None):
     decisions = []
     seen_find = False
     safe_finds = True
     cwd_known = True
+    # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
+    # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
+    write_hit = None
+    if depth == 0:
+        write_hit = scan_writes(cmd, write_state or WriteState([cwd] if cwd else []))
     cwd = cwd or os.getcwd()
     if depth > 4:
         return ("ask", "シェルの入れ子が深すぎるため確認が必要")
@@ -884,27 +1199,27 @@ def check_bash(cmd, depth=0, cwd=None):
             return ("ask", f"削除を伴う可能性のある操作: {m.group(0)}")
 
     # 保護ファイルへの書き込み（リダイレクト・sed -i・tee・cp・mv など）をセグメント単位で判定
-    write_re = (r"(>\s*[^&\s]|\btee\b|\bsed\s+-[a-z]*i|\bcp\b|\bmv\b|\bchmod\b|\bln\b|"
-                r"\bperl\s+-[a-z]*i|\bpython3?\b.*(open|write|dump)|\btruncate\b)")
     for seg in split_segments(cmd):
         # /dev/null への出力捨て・fd 複製（2>/dev/null・>&2 等）は書き込みではない
         seg = re.sub(r"\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|\d*>&\d+", " ", seg)
-        if any(w in seg for w in PROTECTED_WRITE_WORDS) and re.search(write_re, seg):
+        if any(w in seg for w in PROTECTED_WRITE_WORDS) and WRITE_RE.search(seg):
             return ("ask", "ガード設定/認証関連ファイルの変更を含むコマンド")
-    return None
+    # 相対パス・cd 後の書き込み対象を実行ディレクトリ基準で解釈した判定
+    return write_hit
 
 
 def check_edit(path):
+    # 相対パスはプロセスの cwd（main() で hook 入力の cwd に移動済み）基準で解釈する
     p = os.path.realpath(os.path.expanduser(path or ""))
+    lexical = os.path.abspath(os.path.expanduser(path or ""))
     if p.startswith(os.path.join(HOME, ".aws/")):
         return ("deny", "~/.aws 配下の編集は禁止")
-    for prot in PROTECTED_WRITE:
-        if p.startswith(prot):
-            return ("ask", f"ガード設定/認証関連ファイルの変更: {p}")
     # どのプロジェクトでも .claude/settings.json・settings.local.json（権限・hook 設定）は承認対象
-    lexical = os.path.abspath(os.path.expanduser(path or ""))
     if any(re.search(r"/\.claude/settings[^/]*$", v) for v in (p, lexical)):
         return ("ask", f"権限設定ファイルの変更: {p}")
+    # 字句パス・実体パスの両方で、保護パス（字句・実体）と比較する
+    if any(is_protected_write(v) for v in (p, lexical)):
+        return ("ask", f"ガード設定/認証関連ファイルの変更: {p}")
     return None
 
 
@@ -946,8 +1261,11 @@ def main():
         out("deny", "가드 입력을 해석할 수 없습니다. 작업을 실행하지 않았습니다.")
     if not isinstance(data, dict) or not isinstance(data.get("tool_input", {}), dict):
         out("deny", "가드 입력 형식이 잘못되었습니다.")
+    write_state = WriteState(nobase=True)
     if data.get("cwd"):
         os.chdir(data["cwd"])
+        # Bash の相対パス書き込みは hook 入力の cwd（字句パス）と移動後の実体パスの両方で解釈する
+        write_state = WriteState([os.getcwd()] + ([data["cwd"]] if os.path.isabs(data["cwd"]) else []))
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
     # cross-check・prune-memory が起動した Codex は道具方針を渡す。監視の事後停止より前に実行自体を拒否する。
@@ -959,7 +1277,7 @@ def main():
             out("deny", f"이 Codex 실행에서는 {tool[:60]} 도구를 사용할 수 없습니다({TOOL_POLICY_ENV}={policy}).")
     r = None
     if tool == "Bash":
-        r = check_bash(ti.get("command", ""))
+        r = check_bash(ti.get("command", ""), write_state=write_state)
     elif tool in ("Write", "Edit", "NotebookEdit", "MultiEdit"):
         r = check_edit(ti.get("file_path") or ti.get("notebook_path"))
     elif tool == "Read":

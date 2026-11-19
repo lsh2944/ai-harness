@@ -491,6 +491,181 @@ class GuardConfigTests(unittest.TestCase):
                     self.assertEqual(output['permissionDecision'] if output else None, expected)
 
 
+class RelativeWriteTests(unittest.TestCase):
+    """Bash の書き込み対象を cwd（命令内の cd を含む）基準で解釈して保護パスと比較する。"""
+
+    @classmethod
+    def setUpClass(cls):
+        # 実在するハーネス複製（リンク判定・main() の chdir 用）。extra_protected_paths は setup.sh の生成内容に合わせる
+        cls.home = Path(tempfile.mkdtemp(prefix='harness-rel-', dir=env.HOME.parent)).resolve()
+        for rel in ('hooks/guard.py', 'install/install.py', 'settings/claude.json', 'tools/aws/assume_role.sh',
+                    'tools/privacy_check.py', 'tools/harness_setup.py', '.githooks/pre-commit', 'setup.sh',
+                    'docs/x.md', 'README.md'):
+            (cls.home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (cls.home / rel).write_text('')
+        h = str(cls.home)
+        cls.config = env.config(harness_home=h, extra_protected_paths=[
+            h + '/.githooks', h + '/tools/privacy_check.py', h + '/tools/harness_setup.py', h + '/setup.sh'])
+        cls.guard_path = env.isolated_guard(cls.config)
+        cls.g = env.load(cls.guard_path, 'guard_relative')
+
+    def check(self, cases, cwd, guard=None):
+        guard = guard or self.g
+        for command, expected in cases:
+            with self.subTest(command=command, cwd=cwd):
+                result = guard.check_bash(command, cwd=cwd)
+                self.assertEqual(result[0] if result else None, expected, result)
+
+    def test_relative_writes_to_protected_files_need_approval(self):
+        self.check([
+            ("sed -i '' 's/a/b/' hooks/guard.py", 'ask'),
+            ("sed -i '' 's/a/b/' tools/privacy_check.py", 'ask'),
+            ("sed -E -i '' 's/a/b/' hooks/guard.py", 'ask'),
+            ("sed --in-place 's/a/b/' ./hooks/../hooks/guard.py", 'ask'),
+            ('cp /tmp/x hooks/guard.py', 'ask'),
+            ('mv /tmp/x install/install.py', 'ask'),
+            ('cp /tmp/x settings/', 'ask'),
+            ('mv hooks hooks.bak', 'ask'),
+            ('cp /tmp/x tools/aws/assume_role.sh', 'ask'),
+            ('cp /tmp/x tools/harness_setup.py', 'ask'),
+            ('echo x > setup.sh', 'ask'),
+            ('echo x >> hooks/guard.py', 'ask'),
+            ('echo x>hooks/guard.py', 'ask'),
+            ('echo x >| hooks/guard.py', 'ask'),
+            ('echo x >&hooks/guard.py', 'ask'),
+            ('cat /tmp/x | tee -a .githooks/pre-commit', 'ask'),
+            ('chmod +x .githooks/pre-commit', 'ask'),
+            ("python3 -c \"open('hooks/guard.py','w').write('x')\"", 'ask'),
+            ("python3 -c \"import pathlib; pathlib.Path('tools/privacy_check.py').write_text('')\"", 'ask'),
+            ('sed -i "" s/a/b/ hooks/*.py', 'ask'),
+            ('sed -i "" s/a/b/ */guard.py', 'ask'),
+        ], str(self.home))
+
+    def test_cd_is_applied_to_following_segments(self):
+        h = str(self.home)
+        self.check([
+            ("cd hooks; sed -i '' 's/a/b/' guard.py", 'ask'),
+            ('cd hooks && echo x > guard.py', 'ask'),
+            ('cd tools; cp /tmp/x privacy_check.py', 'ask'),
+            ('(cd hooks && echo x > guard.py)', 'ask'),
+            ('{ cd hooks; echo x > guard.py; }', 'ask'),
+            ('if cd hooks; then echo x > guard.py; fi', 'ask'),
+            ('pushd hooks; echo x > guard.py', 'ask'),
+            ("sh -c 'cd hooks; echo x > guard.py'", 'ask'),
+            ('cd docs; cd ..; echo x > hooks/guard.py', 'ask'),
+            (f'cd /tmp && cd {h}/hooks && echo x > guard.py', 'ask'),
+            # 移動先を確定できない cd の後の相対パス書き込みは承認
+            ('cd "$X"; sed -i "" s/a/b/ guard.py', 'ask'),
+            ('cd $(git rev-parse --show-toplevel) && echo x > notes.md', 'ask'),
+            ('cd foo`echo x` && echo x > notes.md', 'ask'),
+            ('cd -; echo x > notes.md', 'ask'),
+            ('cd; echo x > notes.md', 'ask'),
+            ('popd; echo x > notes.md', 'ask'),
+            ('eval cd hooks; echo x > guard.py', 'ask'),
+            ('eval "cd hooks && echo x > guard.py"', 'ask'),
+            ('echo "$(cd hooks; echo x > guard.py)"', 'ask'),
+            ("bash -c 'cd /tmp; true'; echo x > notes.md", None),
+            ('eval cd docs; echo x > notes.md', None),
+            # 書き込みの承認より deny 判定を優先する
+            ('echo x > hooks/guard.py; aws s3api delete-bucket --bucket fake', 'deny'),
+            # 確定できなくても、書き込みがない・絶対パスだけなら従来どおり
+            ('cd "$X"; ls', None),
+            ('cd "$X"; cp /tmp/a /tmp/b', None),
+            ('cd docs && echo x > a.md', None),
+        ], h)
+        # cd .. は字句・実体の両方で解釈する
+        self.check([("cd ..; sed -i '' 's/a/b/' hooks/guard.py", 'ask'),
+                    ("cd ..; sed -i '' 's/a/b/' docs/x.md", None)], h + '/docs')
+
+    def test_unrelated_relative_writes_are_allowed(self):
+        self.check([
+            ("sed -i '' 's/a/b/' docs/x.md", None),
+            ("sed -i '' 's/hooks/x/' README.md", None),
+            ('echo x > notes.txt', None),
+            ('echo x > hooks.md', None),
+            ('cp README.md /tmp/x', None),
+            ('cat hooks/guard.py > /tmp/out', None),
+            ('grep -n "->" hooks/guard.py', None),
+            ('rg "a > b" hooks/', None),
+            ('python3 -m unittest discover -s hooks/tests -t hooks/tests', None),
+            ('python3 tools/privacy_check.py --all', None),
+            ('python3 -c "import json; print(json.dumps(1))" < hooks/guard.py', None),
+            ('git diff -- hooks/guard.py > /tmp/d.txt 2>&1', None),
+            # 区切りをクォートした heredoc の本文はデータ（展開・実行されない）
+            ("cat > /tmp/msg.txt <<'EOF'\nfix: hooks/guard.py 수정 (cp/mv 대상 > hooks/guard.py)\nEOF", None),
+            ("git commit -F - <<\"EOF\"\ncp x hooks/guard.py\nEOF", None),
+            ("git commit -m \"$(cat <<'EOF'\nfix: echo x > hooks/guard.py\nEOF\n)\"", None),
+        ], str(self.home))
+
+    def test_heredoc_exemption_is_limited(self):
+        self.check([
+            # heredoc の書き込み先自体・本文の後のコマンドは判定する
+            ("cat > hooks/guard.py <<'EOF'\nx\nEOF", 'ask'),
+            ("cat > /tmp/x <<'EOF'\nx\nEOF\necho x > hooks/guard.py", 'ask'),
+            ("cat > /tmp/x <<-'EOF'\n\tx\n\tEOF\necho x > hooks/guard.py", 'ask'),
+            # 区切りが未クォートの本文は置換が実行されるため除外しない
+            ('cat > /tmp/x <<EOF\n$(cd hooks; echo x > guard.py)\nEOF', 'ask'),
+            # クォート内の << は heredoc ではない
+            ("echo \"<<'X'\"\nsed -i '' s/a/b/ hooks/guard.py", 'ask'),
+            ("echo '<<X'\necho x > hooks/guard.py\nX", 'ask'),
+        ], str(self.home))
+
+    def test_symlinks_are_resolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td).resolve()
+            (td / 'alias').symlink_to(self.home / 'hooks', target_is_directory=True)
+            (td / 'root').symlink_to(self.home, target_is_directory=True)
+            self.check([('echo x > alias/guard.py', 'ask'), ('cp /tmp/x alias', 'ask'),
+                        ('cd root/hooks; echo x > guard.py', 'ask'), ('echo x > other.txt', None)], str(td))
+            # 実行ディレクトリ自体がリンク
+            self.check([("sed -i '' s/a/b/ hooks/guard.py", 'ask')], str(td / 'root'))
+            # 設定の harness_home がリンク（保護パスの実体でも判定する）。Edit 系も同じ
+            linked = env.load(env.isolated_guard(env.config(harness_home=str(td / 'root'))), 'guard_linked_home')
+            self.check([("sed -i '' s/a/b/ hooks/guard.py", 'ask'), ('echo x > docs/x.md', None)],
+                       str(self.home), linked)
+            self.assertEqual(linked.check_edit(str(self.home / 'hooks/guard.py'))[0], 'ask')
+            self.assertIsNone(linked.check_edit(str(self.home / 'docs/x.md')))
+
+    def test_without_cwd_uses_protected_names(self):
+        cases = [
+            ("sed -i '' 's/a/b/' hooks/guard.py", 'ask'),
+            ('cp /tmp/x tools/privacy_check.py', 'ask'),
+            ('cp /tmp/x tools/aws/assume_role.sh', 'ask'),
+            ('echo x > setup.sh', 'ask'),
+            ('cp a .githooks/pre-commit', 'ask'),
+            ('mv /tmp/x install', 'ask'),
+            ("sed -i '' 's/a/b/' docs/x.md", None),
+            ('echo x > myhooks/x', None),
+            ('echo x > notes.txt', None),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                result = self.g.check_bash(command)
+                self.assertEqual(result[0] if result else None, expected, result)
+
+    def test_hook_input_cwd_end_to_end(self):
+        h = str(self.home)
+        cases = [
+            ('Bash', {'command': "sed -i '' 's/a/b/' hooks/guard.py"}, h, 'ask'),
+            ('Bash', {'command': 'cd tools && echo x > privacy_check.py'}, h, 'ask'),
+            ('Bash', {'command': "sed -i '' 's/a/b/' docs/x.md"}, h, None),
+            ('Bash', {'command': "sed -i '' 's/a/b/' guard.py"}, h + '/hooks', 'ask'),
+            # Edit 系・apply_patch の相対パスも hook 入力の cwd 基準
+            ('Write', {'file_path': 'hooks/guard.py'}, h, 'ask'),
+            ('Edit', {'file_path': 'docs/x.md'}, h, None),
+            ('apply_patch', {'command': '*** Update File: tools/privacy_check.py\n'}, h, 'ask'),
+            ('apply_patch', {'command': '*** Update File: docs/x.md\n'}, h, None),
+        ]
+        for runtime in ('claude', 'codex'):
+            for tool, tool_input, cwd, expected in cases:
+                with self.subTest(runtime=runtime, tool=tool, tool_input=tool_input):
+                    payload = json.dumps({'tool_name': tool, 'tool_input': tool_input, 'cwd': cwd})
+                    result = run_guard(payload, runtime, guard=self.guard_path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    decision = json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
+                    self.assertEqual(decision, 'deny' if runtime == 'codex' and expected == 'ask' else expected)
+
+
 class UsageTests(unittest.TestCase):
     def test_warning_distinguishes_local_tokens_from_account_quota(self):
         with tempfile.TemporaryDirectory() as td:
