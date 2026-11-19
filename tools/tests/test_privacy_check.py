@@ -86,6 +86,17 @@ class ScanTextTests(unittest.TestCase):
         self.assertEqual(kinds(f'path={home}/x', home=home), ['current HOME path'])
         self.assertEqual(kinds('path=/opt/people/dave', home=home), [])
 
+    def test_home_path_without_trailing_slash(self):
+        name = 'alice'
+        for line in ('/Users/' + name, 'cd /Users/' + name + ' && ls', '"/home/' + name + '"', '(/Users/' + name + ')',
+                     '/home/' + name + ',', '/home/' + name + ':', '/Users/' + name + ';', '`/Users/' + name + '`'):
+            with self.subTest(line=line):
+                self.assertEqual(kinds(line), ['home path'])
+        # 仮の名前は文末の句点があっても許可する
+        self.assertEqual(kinds('see /Users/x. and /home/u'), [])
+        # 名前の後ろに英数字以外の未知の文字（@ 等）が続く場合は対象外
+        self.assertEqual(kinds('/Users/' + name + '@host'), [])
+
     def test_mask_hides_most_of_value(self):
         shown = privacy.mask(FAKE_AKIA)
         self.assertNotIn(FAKE_AKIA, shown)
@@ -181,14 +192,111 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('dir with space/ファイル.txt:1: GitHub token', result.stdout)
 
-    def test_binary_and_large_files_are_skipped_with_notice(self):
+    def test_binary_file_is_skipped_and_blocks(self):
         self.write('image.bin', b'\x00\x01' + FAKE_AKIA.encode())
-        self.write('big.txt', 'a' * (privacy.MAX_BYTES + 1))
+        self.write('clean.txt', 'ok\n')
         self.git('add', '.')
         result = self.check('--staged')
-        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn('SKIP image.bin: binary', result.stdout)
-        self.assertIn('SKIP big.txt: larger than', result.stdout)
+        self.assertIn('could not be checked', result.stdout)
+        self.assertIn('--no-verify', result.stdout)
+        self.git('commit', '-qm', 'base')
+        self.assertEqual(self.check('--all').returncode, 1)
+
+    def test_large_text_is_checked_including_chunk_boundaries(self):
+        # 値が CHUNK の境界をまたぐように置き、さらに末尾近くにも置く
+        prefix = 'a' * (privacy.CHUNK - 5)
+        body = prefix + FAKE_AKIA + '\n' + ('b' * 100 + '\n') * 20000 + 'tail ' + FAKE_EMAIL + '\n'
+        self.write('big.txt', body)
+        self.git('add', '.')
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('big.txt:1: AWS access key ID', result.stdout)
+        self.assertIn('big.txt:20002: email', result.stdout)
+        self.assertNotIn('SKIP', result.stdout)
+
+    def test_utf16_and_utf32_with_bom_are_decoded(self):
+        for codec in ('utf-16', 'utf-16-be', 'utf-32'):
+            with self.subTest(codec=codec):
+                text = f'line1\nkey {FAKE_AKIA}\n'
+                data = text.encode(codec)
+                if codec == 'utf-16-be':
+                    data = b'\xfe\xff' + data
+                self.write('wide.txt', data)
+                self.git('add', 'wide.txt')
+                result = self.check('--staged')
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('wide.txt:2: AWS access key ID', result.stdout)
+                self.assertNotIn('SKIP', result.stdout)
+
+    def test_utf16_without_bom_is_treated_as_binary(self):
+        self.write('nobom.txt', f'key {FAKE_AKIA}\n'.encode('utf-16-le'))
+        self.git('add', '.')
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('SKIP nobom.txt: binary', result.stdout)
+
+    def test_type_change_to_symlink_is_checked(self):
+        self.write('link', 'plain\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'base')
+        (self.repo / 'link').unlink()
+        os.symlink(FAKE_HOME_PATH + '/secret', self.repo / 'link')
+        self.git('add', 'link')
+        status = self.git('diff', '--cached', '--name-status').stdout
+        self.assertTrue(status.startswith('T'), status)
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('link:1: home path', result.stdout)
+
+    def test_pathspec_magic_characters_in_file_names(self):
+        for name in ('br[ab]c.txt', 'star*.txt', ':(glob)x.txt'):
+            self.write(name, f'{FAKE_EMAIL}\n')
+        self.write('brac.txt', 'clean\n')  # [ab] が glob として解釈されると拾われる名前
+        self.git('add', '.')
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 1)
+        for name in ('br[ab]c.txt', 'star*.txt', ':(glob)x.txt'):
+            self.assertIn(f'{name}:1: email', result.stdout)
+        self.assertNotIn('brac.txt:', result.stdout)
+        self.assertIn('3 finding(s) in 4 staged file(s)', result.stdout)
+
+    def test_note_when_privacy_words_missing(self):
+        self.write('a.txt', 'ok\n')
+        self.git('add', '.')
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('privacy_words', result.stdout)
+        self.write('config.local.json', json.dumps({'privacy_words': ['Contoso']}))
+        self.assertNotIn('note:', self.check('--staged').stdout)
+
+    def message(self, text):
+        path = Path(self.temp.name) / 'COMMIT_EDITMSG'
+        path.write_text(text, encoding='utf-8')
+        return subprocess.run([sys.executable, str(SCRIPT), '--message', str(path)], cwd=self.repo, env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_message_checks_body_but_not_comments(self):
+        clean = 'feat: x\n\n- y\n\nCo-Authored-By: Claude <noreply' + '@anthropic.com>\n# ' + FAKE_EMAIL + '\n'
+        result = self.message(clean)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('privacy_words', result.stdout)
+        result = self.message('fix: z\n\nowner ' + FAKE_ACCOUNT + '\n')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('<commit message>:3: AWS account ID', result.stdout)
+        self.assertNotIn(FAKE_ACCOUNT, result.stdout)
+
+    def test_message_ignores_verbose_diff_after_scissors(self):
+        text = 'docs: a\n# ------------------------ >8 ------------------------\n+' + FAKE_EMAIL + '\n'
+        self.assertEqual(self.message(text).returncode, 0)
+
+    def test_message_respects_comment_char_and_words(self):
+        self.git('config', 'core.commentChar', ';')
+        self.write('config.local.json', json.dumps({'privacy_words': ['Contoso']}))
+        result = self.message('; Contoso comment\n# contoso is not a comment now\n')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('<commit message>:2: privacy_words', result.stdout)
 
     def test_privacy_words_from_local_config(self):
         self.write('.gitignore', 'config.local.json\n')
