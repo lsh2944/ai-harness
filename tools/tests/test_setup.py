@@ -184,6 +184,21 @@ class SetupScriptTests(Fixture):
                 self.assertIn('DRY-RUN:', out)
         self.assertEqual((self.clone / 'config.local.json').read_bytes(), before)
 
+    def test_missing_hook_exec_bit_is_reported(self):
+        # 実行権限のない hook は git が黙って飛ばすため、post-commit も含めて警告する
+        for name in ('pre-commit', 'post-merge', 'post-commit'):
+            with self.subTest(hook=name):
+                hook = self.clone / '.githooks' / name
+                hook.chmod(0o644)
+                try:
+                    code, out = self.setup(self.ANSWERS, '--no-apply')
+                    self.assertEqual(code, 0, out)
+                    self.assertIn(f'.githooks/{name} 에 실행 권한이 없어', out)
+                    others = {'pre-commit', 'post-merge', 'post-commit'} - {name}
+                    self.assertFalse(any(f'.githooks/{o} 에 실행 권한' in out for o in others), out)
+                finally:
+                    hook.chmod(0o755)
+
     def test_invalid_answers_are_asked_again(self):
         answers = ['', 'Name', 'not-an-email', 'n@example.com', 'relative/path', '/abs/project',
                    'relative-python', '-', '', '', 'n']
