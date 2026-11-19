@@ -1,0 +1,25 @@
+#!/bin/sh
+# コミット前の個人情報検査。ステージされた内容（index）を tools/privacy_check.py で調べ、検出したらコミットを止める。
+# 有効化: git config --local core.hooksPath .githooks（setup.sh が設定する）
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[pre-commit] python3가 없어 개인정보 검사를 실행할 수 없습니다. 커밋을 중단했습니다." >&2
+    exit 1
+fi
+
+python3 tools/privacy_check.py --staged
+status=$?
+if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 1 ]; then
+        echo "[pre-commit] 개인정보·비밀값 형태가 검출되어 커밋을 중단했습니다." >&2
+    else
+        echo "[pre-commit] 개인정보 검사가 오류로 끝나 커밋을 중단했습니다." >&2
+    fi
+    echo "  - 실제 값이면 파일에서 지우거나 자리표시자로 바꾼 뒤 다시 git add 하세요." >&2
+    echo "  - 오탐이면 tools/privacy_check.py의 패턴·허용 목록을 고쳐서 함께 커밋하세요." >&2
+    echo "  - git commit --no-verify 로 검사를 건너뛸 수 있지만, 우회 여부는 사용자가 직접 판단합니다." >&2
+    exit 1
+fi
+exit 0

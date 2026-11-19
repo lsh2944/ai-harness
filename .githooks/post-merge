@@ -1,0 +1,35 @@
+#!/bin/sh
+# git pull（merge・fast-forward）後、設置関連ファイルが変わっていたら知らせ、install.py の dry-run 要約を出す。
+# 適用（--apply）は行わず、利用者が端末で実行するコマンドを案内するだけ。失敗しても merge 結果には影響しない。
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+git rev-parse -q --verify ORIG_HEAD >/dev/null 2>&1 || exit 0
+[ "$(git rev-parse ORIG_HEAD)" != "$(git rev-parse HEAD)" ] || exit 0
+
+changed=$(git diff --name-only ORIG_HEAD HEAD -- hooks install settings instructions skills agents tools/aws 2>/dev/null) || exit 0
+[ -n "$changed" ] || exit 0
+
+echo
+echo "[ai-harness] 설치본에 반영이 필요한 파일이 바뀌었습니다:"
+printf '%s\n' "$changed" | sed 's/^/  /'
+
+if [ ! -f config.local.json ]; then
+    echo "config.local.json 이 없습니다. 이 컴퓨터에서 처음이면 ./setup.sh 를 실행하세요."
+    exit 0
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3가 없어 dry-run 요약을 만들 수 없습니다."
+    exit 0
+fi
+
+python3 tools/harness_setup.py dry-run
+status=$?
+if [ "$status" -eq 3 ]; then
+    echo "설치본은 이미 최신입니다."
+elif [ "$status" -eq 0 ]; then
+    echo "반영하려면 터미널에서 직접 실행하고 확인 문구에 apply를 입력하세요(자동 적용하지 않습니다):"
+    command=$(python3 tools/harness_setup.py apply-command) && echo "  $command"
+else
+    echo "dry-run이 실패했습니다. ./setup.sh 또는 install.py dry-run으로 확인하세요."
+fi
+exit 0
