@@ -19,6 +19,8 @@ Claude와 Codex가 같은 중립 입력으로 **각자 조사·설계한 뒤** �
 
 ## 절차
 
+**P1-b 메인의 원문 저장:** Agent 결과의 실제 응답 본문 text block을 그대로 복사하고 별도 `agentId`·`usage` metadata는 포함하지 않는다. 끝 개행·닫는 코드펜스·괄호 등 **문자 추가도 금지**한다. 설명·열린 펜스·JSON으로 끝난 응답도 닫는 펜스를 덧붙이지 않고 저장한 뒤 strict 검증 오류를 보고한다. 일반 Markdown 문서처럼 보완하거나 줄바꿈을 정규화하지 않는다. 본문 구분·오류 처리·전송 직전 점검은 [상세 계약과 순수 JSON 예제](architect-handoff.md)를 따른다.
+
 진행은 runner `status`와 짧은 보고로 확인하며 내부 P0~P5를 별도 Task 목록에 중복 등록·갱신하지 않는다. 명시 요청·기존 상위 개발 작업 연결에 필요한 Task는 유지한다.
 
 `init` 응답의 `project_root`를 절대경로 기준 `WS`로 사용한다. 메인의 인계 원본·prepare 출력·부분 초안 `--out`/`--partial-file`은 `$WS/.local/cross-check-drafts/<unique>/...json` 형태의 실제 절대경로로 지정한다. 고유 디렉터리는 먼저 준비하고 `<unique>`는 실제 값으로 바꾼다. 이 안내는 기존 PROJECT·보호 경로·새 파일 검사를 완화하지 않는다.

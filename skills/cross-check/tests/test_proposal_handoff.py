@@ -2,7 +2,6 @@
 import copy
 import json
 from pathlib import Path
-import re
 
 from test_partial_submission import SubmissionBase, co
 
@@ -94,6 +93,51 @@ class ProposalHandoffTests(SubmissionBase):
                 self.assertNotIn('proposal_handoff', self.env.session(sid))
                 self.assertFalse(output.exists())
                 self.assertFalse((co.store(sid) / 'architect-handoff.json').exists())
+
+    def test_open_fence_response_and_appended_closing_fence_are_both_rejected_unchanged(self):
+        # 実際の失敗形を合成データで再現。入力を補修して成功扱いにしない。
+        for prefix, suffix in (('조사 완료 안내\n```json\n', ''), ('조사 완료 안내\n```json\n', '\n```\n'), ('', '\n```\n')):
+            with self.subTest(prefix=prefix, suffix=suffix):
+                sid = self.proposed()
+                message = self.single_observation_message()
+                body = prefix + json.dumps(message, ensure_ascii=False)
+                source = self.draft(body + suffix)
+                original = source.read_bytes()
+                result, output = self.prepare(sid, message, False, source=source)
+                self.assertEqual(result['status'], 'INVALID')
+                self.assertIn('preserve the complete architect response', result['error'])
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(self.env.session(sid)['evidence'], [])
+                self.assertNotIn('proposal_handoff', self.env.session(sid))
+                self.assertFalse(output.exists())
+                self.assertFalse((co.store(sid) / 'architect-handoff.json').exists())
+
+    def test_saved_json_bytes_and_internal_fences_are_preserved_for_unicode_and_crlf(self):
+        # 保存済み入力からの保全だけを検査する。モデルの生成や最初のコピーは認証しない。
+        for newline in ('none', 'lf', 'crlf'):
+            with self.subTest(newline=newline):
+                calls_before = self.env.calls()
+                sid = self.proposed()
+                message = self.single_observation_message()
+                message['proposal']['summary'] = '조건 A\n```python\nx = "가나다・日本語・🙂"\n```\r\n미확인 유지'
+                message['proposal']['evidence'][0]['observation'] += '\n```text\n원문 내부 펜스\n```'
+                text = json.dumps(message, ensure_ascii=False, indent=2)
+                raw = (text + ('\n' if newline != 'none' else '')).encode('utf-8')
+                if newline == 'crlf':
+                    raw = raw.replace(b'\n', b'\r\n')
+                source = self.location('original-response.json')
+                source.write_bytes(raw)
+                result, output = self.prepare(sid, message, source=source)
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertEqual((co.store(sid) / 'architect-handoff.json').read_bytes(), raw)
+                expected = copy.deepcopy(message['proposal'])
+                expected['evidence'][0]['id'] = result['evidence_mapping']['local:source_a']
+                self.assertEqual(json.loads(output.read_bytes()), expected)
+                self.assertEqual(self.env.session(sid)['evidence'][0]['observation'], message['proposal']['evidence'][0]['observation'])
+                self.env.ok('freeze', '--session', sid, '--side', 'claude', '--file', output)
+                self.assertEqual(co.read_json_artifact(sid, 'claude/proposal.json'), expected)
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertEqual(self.env.calls(), calls_before + ['proposal'])
 
     def test_v2_single_observation_preserves_full_proposal_registry_and_freeze(self):
         sid = self.proposed()
@@ -188,8 +232,11 @@ class ProposalHandoffTests(SubmissionBase):
         self.assertEqual(later['id'], 'E4')
 
     def test_documented_architect_example_matches_real_schema_and_prepares_without_rewriting(self):
-        text = (Path(__file__).resolve().parents[1] / 'references/architect-handoff.md').read_text()
-        message = json.loads(re.search(r'```json\n(.*?)\n```', text, re.S).group(1))
+        references = Path(__file__).resolve().parents[1] / 'references'
+        text = (references / 'architect-handoff.md').read_text()
+        self.assertIn('(architect-handoff.example.json)', text)
+        self.assertNotIn('```', text)
+        message = json.loads((references / 'architect-handoff.example.json').read_bytes())
         co.validate_doc(message['proposal'], 'proposal')
         source = self.env.project / 'src/app.py'
         manifest = message['evidence_manifest'][0]

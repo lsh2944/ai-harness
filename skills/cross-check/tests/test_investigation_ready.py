@@ -79,6 +79,10 @@ class InvestigationReadyTests(unittest.TestCase):
                 parsed = co.parser().parse_args(command[2:] + ['--file', str(self.env.project / 'src/app.py'), '--whole-file'])
                 self.assertEqual((parsed.session, parsed.action, parsed.whole_file), (sid, 'inspect', True))
                 self.assertIn('최종 응답 전체가 JSON', prompt)
+                self.assertEqual(metadata['output_example'], str(co.HERE.parent / 'references/architect-handoff.example.json'))
+                self.assertIn('전송 직전 최종 메시지 자체를 점검', prompt)
+                self.assertIn('JSON 문자열 내부의 코드펜스·개행은 제거하지', prompt)
+                self.assertIn('별도 AI 호출·테스트 실행·내용 축약을 하지', prompt)
                 actual_sources = {str(self.env.project / 'src/app.py'), str(self.env.project / 'src/other.py')}
                 self.assertFalse(actual_sources & {str(c.args[0]) for c in reads.call_args_list})
 
@@ -388,6 +392,22 @@ class MainFreezeHandoffTests(unittest.TestCase):
 
 
 class InvestigationRoutingTests(unittest.TestCase):
+    def test_output_modes_and_verbatim_copy_rules_are_explicit_without_claiming_authentication(self):
+        # 文書の分岐・境界の回帰だけであり、実モデルの遵守は検証しない。
+        actor = (SKILL.parents[1] / 'agents/architect.md').read_text()
+        contract = (SKILL / 'references/architect-handoff.md').read_text()
+        skill = (SKILL / 'SKILL.md').read_text()
+        debate = (SKILL / 'references/debate.md').read_text()
+        self.assertLess(actor.index('## 출력 모드 먼저 선택'), actor.index('## 절대 원칙'))
+        self.assertIn('## 일반 설계 요청의 Markdown 출력 형식', actor)
+        self.assertIn('P1-b에서는 이 형식을 사용하지 않는다', actor)
+        self.assertIn('최초 저장이 실제 응답과 같은지 자동 인증하는 기능은 아니다', contract)
+        self.assertIn('끝 개행(LF/CRLF)·닫는 코드펜스·따옴표·괄호를 붙이지 않고', contract)
+        self.assertIn('metadata처럼 보이는 문자열을 지우지 않는다', contract)
+        for text in (skill, debate):
+            self.assertIn('text block', text)
+            self.assertIn('끝 개행·닫는', text)
+
     def test_documents_separate_prepare_wait_check_and_independent_investigation(self):
         # 手順の脱落を検出する文書回帰テスト。実 Claude の遵守や品質同等性の証明ではない。
         skill = (SKILL / 'SKILL.md').read_text()
