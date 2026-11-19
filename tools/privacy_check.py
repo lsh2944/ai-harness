@@ -4,7 +4,7 @@
 使い方（cwd はこのリポジトリ内）:
   python3 tools/privacy_check.py --staged          # index の削除以外の変更ファイル（pre-commit hook が使う）
   python3 tools/privacy_check.py --all             # 追跡ファイル全体（index の内容）
-  python3 tools/privacy_check.py --message <file>  # コミットメッセージ（コメント行を除く。commit-msg hook が使う）
+  python3 tools/privacy_check.py --message <file>  # コミットメッセージ（コメント行も含め全行。commit-msg hook が使う）
 
 検出時は「ファイル:行: 種類 (一部マスクした値)」だけを出力し、終了コード 1。
 検査できないファイル（NUL を含むバイナリ）があっても終了コード 1（中身を確かめずに通さない）。
@@ -49,8 +49,8 @@ ACCOUNT_ID = re.compile(r'(?<![0-9A-Za-z])([0-9]{12})(?![0-9A-Za-z])')
 IAM_ARN = re.compile(r'arn:aws[a-z-]*:iam::([0-9]{12})')
 # 先頭の否定後読みで連続文字列の途中からの再試行を止める（長い行で計算量が二乗にならないようにする）
 EMAIL = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}')
-# 名前の後ろが / だけでなく空白・引用符・括弧・カンマ・コロン・セミコロン・行末でも検出する（/Users/<名前> 単独も対象）
-HOME_PATH = re.compile(r'/(?:Users|home)/([A-Za-z0-9._-]+)(?=[/\s\'"`()\[\]{}<>,:;]|$)')
+# 名前の後ろが名前に使える文字以外なら何でも検出する（/Users/<名前> 単独・\ = | ? # & * ! @ + % 等の前も対象）
+HOME_PATH = re.compile(r'/(?:Users|home)/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])')
 SECRET_PATTERNS = (
     ('AWS access key ID', re.compile(r'AKIA[0-9A-Z]{16}')),
     ('GitHub token', re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}')),
@@ -161,22 +161,45 @@ def scan_stream(chunks, words=(), home=None):
         for _ in iterator:
             pass
         return None, 'binary'
-    decoder = codecs.getincrementaldecoder(codec or 'utf-8')(errors='replace')
     pairs = lowered(words)
-    findings, state = [], {'pending': '', 'number': 0}
-
-    def feed(text, final):
-        lines = (state['pending'] + text).split('\n')
-        state['pending'] = '' if final else lines.pop()
-        for line in lines:
-            state['number'] += 1
-            findings.extend(scan_line(line.rstrip('\r'), state['number'], pairs, home))
-
-    feed(decoder.decode(head), False)
-    for data in iterator:
-        feed(decoder.decode(data), False)
-    feed(decoder.decode(b'', final=True), True)
+    # BOM で文字コードを決めた場合、BOM だけ付けた UTF-8 本文（BOM 偽装）でも見逃さないよう、
+    # 元のバイトから NUL を除いて UTF-8・latin-1 としても検査し、検出は和集合にする。
+    feeders = [LineFeeder(codec or 'utf-8', pairs, home)]
+    if codec:
+        feeders += [LineFeeder('utf-8', pairs, home, strip_nul=True), LineFeeder('latin-1', pairs, home, strip_nul=True)]
+    for data in (head, *iterator):
+        for feeder in feeders:
+            feeder.feed(data)
+    findings, seen = [], set()
+    for feeder in feeders:
+        for item in feeder.finish():
+            if item not in seen:
+                seen.add(item)
+                findings.append(item)
     return findings, None
+
+
+class LineFeeder:
+    """bytes を逐次デコードし、塊の境界をまたぐ行を繋げてから 1 行ずつ検査する。"""
+
+    def __init__(self, codec, pairs, home, strip_nul=False):
+        self.decoder = codecs.getincrementaldecoder(codec)(errors='replace')
+        self.pairs, self.home, self.strip_nul = pairs, home, strip_nul
+        self.pending, self.number, self.findings = '', 0, []
+
+    def _lines(self, text, final):
+        lines = (self.pending + text).split('\n')
+        self.pending = '' if final else lines.pop()
+        for line in lines:
+            self.number += 1
+            self.findings.extend(scan_line(line.rstrip('\r'), self.number, self.pairs, self.home))
+
+    def feed(self, data):
+        self._lines(self.decoder.decode(data.replace(b'\0', b'') if self.strip_nul else data), False)
+
+    def finish(self):
+        self._lines(self.decoder.decode(b'', final=True), True)
+        return self.findings
 
 
 def git(root, *args):
@@ -309,18 +332,9 @@ def run_files(staged):
     return 1 if count or skipped else 0
 
 
-def comment_char(root):
-    try:
-        result = subprocess.run(['git', '-C', str(root), 'config', '--get', 'core.commentChar'],
-                                capture_output=True, text=True, timeout=GIT_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):
-        return '#'
-    value = result.stdout.strip()
-    # auto（自動選択）や未設定は既定の # とみなす
-    return value if result.returncode == 0 and len(value) == 1 else '#'
-
-
 def run_message(path):
+    # コメント行・scissors 以降も検査する。-m / -F のコミットは cleanup=whitespace でコメント行が本文に残るため。
+    # テンプレートのコメントに検出値があれば止まるが、その扱い（メッセージ修正・--no-verify）は利用者が判断する。
     root = repo_root()
     words = lowered(load_words(root))
     home = home_dir()
@@ -328,16 +342,9 @@ def run_message(path):
         text = Path(path).read_bytes().decode('utf-8', 'replace')
     except OSError as error:
         raise CheckError(f'cannot read commit message: {type(error).__name__}') from None
-    char = comment_char(root)
-    scissors = f'{char} ------------------------ >8 ------------------------'
     count = 0
     for number, line in enumerate(text.split('\n'), 1):
-        line = line.rstrip('\r')
-        if line == scissors:
-            break  # これ以降（commit -v の差分）は git がメッセージから取り除く
-        if line.startswith(char):
-            continue
-        count += report('<commit message>', scan_line(line, number, words, home))
+        count += report('<commit message>', scan_line(line.rstrip('\r'), number, words, home))
     print(f'privacy_check: {count} finding(s) in commit message')
     if not words:
         print(WORDS_NOTE)
@@ -349,7 +356,7 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--staged', action='store_true', help='check added/modified files in the git index')
     mode.add_argument('--all', action='store_true', help='check all tracked files (index content)')
-    mode.add_argument('--message', metavar='FILE', help='check a commit message file (comment lines excluded)')
+    mode.add_argument('--message', metavar='FILE', help='check a commit message file (all lines, including comments)')
     args = parser.parse_args(argv)
     try:
         if args.message is not None:

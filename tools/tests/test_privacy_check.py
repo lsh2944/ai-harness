@@ -92,10 +92,12 @@ class ScanTextTests(unittest.TestCase):
                      '/home/' + name + ',', '/home/' + name + ':', '/Users/' + name + ';', '`/Users/' + name + '`'):
             with self.subTest(line=line):
                 self.assertEqual(kinds(line), ['home path'])
+        for after in ('\\', '=', '|', '?', '#', '&', '*', '!', '@', '+', '%'):
+            with self.subTest(after=after):
+                self.assertEqual(kinds('/Users/' + name + after + 'z'), ['home path'])
         # 仮の名前は文末の句点があっても許可する
         self.assertEqual(kinds('see /Users/x. and /home/u'), [])
-        # 名前の後ろに英数字以外の未知の文字（@ 等）が続く場合は対象外
-        self.assertEqual(kinds('/Users/' + name + '@host'), [])
+        self.assertEqual(kinds('/Users/u=1 /home/x|y'), [])
 
     def test_mask_hides_most_of_value(self):
         shown = privacy.mask(FAKE_AKIA)
@@ -230,6 +232,23 @@ class CommandTests(unittest.TestCase):
                 self.assertIn('wide.txt:2: AWS access key ID', result.stdout)
                 self.assertNotIn('SKIP', result.stdout)
 
+    def test_bom_disguised_utf8_is_still_checked(self):
+        # UTF-8 本文の先頭に UTF-16/32 の BOM だけを付けた偽装
+        for bom in (b'\xff\xfe', b'\xfe\xff', b'\xff\xfe\x00\x00'):
+            with self.subTest(bom=bom):
+                self.write('fake.txt', bom + f'first\nowner {FAKE_ACCOUNT}\n'.encode())
+                self.git('add', 'fake.txt')
+                result = self.check('--staged')
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('fake.txt:2: AWS account ID', result.stdout)
+                self.assertNotIn(FAKE_ACCOUNT, result.stdout)
+
+    def test_genuine_utf16_findings_are_not_duplicated(self):
+        self.write('wide.txt', f'a\nkey {FAKE_AKIA}\n'.encode('utf-16'))
+        self.git('add', '.')
+        result = self.check('--staged')
+        self.assertEqual(result.stdout.count('wide.txt:2: AWS access key ID'), 1, result.stdout)
+
     def test_utf16_without_bom_is_treated_as_binary(self):
         self.write('nobom.txt', f'key {FAKE_AKIA}\n'.encode('utf-16-le'))
         self.git('add', '.')
@@ -277,8 +296,8 @@ class CommandTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPT), '--message', str(path)], cwd=self.repo, env=self.env,
                               capture_output=True, text=True, timeout=60)
 
-    def test_message_checks_body_but_not_comments(self):
-        clean = 'feat: x\n\n- y\n\nCo-Authored-By: Claude <noreply' + '@anthropic.com>\n# ' + FAKE_EMAIL + '\n'
+    def test_message_checks_body(self):
+        clean = 'feat: x\n\n- y\n\nCo-Authored-By: Claude <noreply' + '@anthropic.com>\n# plain comment\n'
         result = self.message(clean)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('privacy_words', result.stdout)
@@ -287,16 +306,22 @@ class CommandTests(unittest.TestCase):
         self.assertIn('<commit message>:3: AWS account ID', result.stdout)
         self.assertNotIn(FAKE_ACCOUNT, result.stdout)
 
-    def test_message_ignores_verbose_diff_after_scissors(self):
+    def test_message_checks_comment_lines_and_after_scissors(self):
+        # -m / -F（cleanup=whitespace）ではコメント行も本文に残るので検査する
+        result = self.message('docs: a\n# ' + FAKE_EMAIL + '\n')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('<commit message>:2: email', result.stdout)
         text = 'docs: a\n# ------------------------ >8 ------------------------\n+' + FAKE_EMAIL + '\n'
-        self.assertEqual(self.message(text).returncode, 0)
+        result = self.message(text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('<commit message>:3: email', result.stdout)
 
-    def test_message_respects_comment_char_and_words(self):
-        self.git('config', 'core.commentChar', ';')
+    def test_message_uses_privacy_words(self):
         self.write('config.local.json', json.dumps({'privacy_words': ['Contoso']}))
-        result = self.message('; Contoso comment\n# contoso is not a comment now\n')
+        result = self.message('fix: y\n; contoso note\n')
         self.assertEqual(result.returncode, 1)
         self.assertIn('<commit message>:2: privacy_words', result.stdout)
+        self.assertNotIn('note:', result.stdout)
 
     def test_privacy_words_from_local_config(self):
         self.write('.gitignore', 'config.local.json\n')

@@ -86,12 +86,12 @@ Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다
 `setup.sh`가 `core.hooksPath`를 설정한 저장소에서만 동작한다. 수동 설정: `git config --local core.hooksPath .githooks`.
 
 - **pre-commit**: `python3 tools/privacy_check.py --staged`로 index의 삭제 외 모든 변경 파일(추가·수정·이름 변경·타입 변경, 심볼릭 링크는 대상 문자열)을 검사한다. 12자리 AWS 계정 ID·IAM ARN·이메일·AWS 액세스 키·GitHub 토큰·`sk-` 키·PRIVATE KEY 헤더·`/Users/<이름>`·`/home/<이름>` 경로·현재 사용자의 HOME 경로와 `privacy_words`를 찾으면 `파일:행: 종류(값 일부 마스킹)`를 출력하고 커밋을 막는다.
-  - 크기 상한은 없다(1MiB 단위로 읽어 줄 단위로 검사). BOM 있는 UTF-8/16/32는 디코드해 검사한다. 앞부분에 NUL이 있는 바이너리(BOM 없는 UTF-16 포함)는 검사할 수 없으므로 `SKIP`으로 표시하고 **커밋을 막는다**. 내용을 확인한 뒤 `--no-verify` 사용 여부는 사용자가 결정한다.
+  - 크기 상한은 없다(1MiB 단위로 읽어 줄 단위로 검사). BOM 있는 UTF-8/16/32는 디코드해 검사하고, BOM만 붙인 위장에 대비해 원본 바이트에서 NUL을 뺀 UTF-8·latin-1로도 한 번 더 검사한다(검출은 합집합). 앞부분에 NUL이 있는 바이너리(BOM 없는 UTF-16 포함)는 검사할 수 없으므로 `SKIP`으로 표시하고 **커밋을 막는다**. 내용을 확인한 뒤 `--no-verify` 사용 여부는 사용자가 결정한다.
   - `privacy_words`가 없으면 "고유명사 검사는 privacy_words 설정 시에만"이라는 알림이 한 줄 나온다(차단하지 않음).
   - 오탐이면 **사용자 확인을 받은 뒤** `tools/privacy_check.py`의 패턴·허용 목록을 고친다(허용 목록은 최소한으로 두고 근거를 주석으로 남긴다). 테스트용 값은 소스에 그대로 쓰지 말고 실행 시 문자열을 이어 붙여 만든다.
   - `git commit --no-verify`로 건너뛸 수 있지만 우회 여부는 사용자가 판단한다.
   - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용. 바이너리가 있으면 종료 코드 1).
-- **commit-msg**: `python3 tools/privacy_check.py --message <파일>`로 커밋 메시지(주석 줄·`commit -v`의 scissors 아래 제외)를 같은 패턴으로 검사해 검출 시 막는다. `Co-Authored-By`의 `noreply@anthropic.com`은 허용. 커밋 작성자(user.email) 정보는 검사하지 않는다.
+- **commit-msg**: `python3 tools/privacy_check.py --message <파일>`로 커밋 메시지 전체(`#` 주석 줄·`commit -v`의 scissors 아래 포함. `-m`·`-F` 커밋은 cleanup=whitespace라 주석 줄도 본문에 남기 때문)를 같은 패턴으로 검사해 검출 시 막는다. 편집기 템플릿의 주석(예: `commit -v`의 diff)에 검출 값이 있어 막히면 메시지 수정이나 `--no-verify`는 사용자가 판단한다. `Co-Authored-By`의 `noreply@anthropic.com`은 허용. 커밋 작성자(user.email) 정보는 검사하지 않는다.
 - **post-merge**: `git pull`(merge·fast-forward) 후 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 목록과, 사용자가 터미널에서 실행할 install.py dry-run·적용 명령(절대 경로, AWS 모듈 사용 시 `--with-aws`)을 **출력만** 한다. Python·install.py를 실행하지 않는다. `config.local.json`이 없으면 `./setup.sh`, aws 절이 견본 값이면 편집을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
 - 이 hook들과 검사기·`setup.sh`·`tools/harness_setup.py`를 바꾸거나 `core.hooksPath`를 바꾸는 것은 커밋 전에 사용자 확인을 받는다(CLAUDE.md). `setup.sh`가 새로 만드는 `config.local.json`은 이 경로들을 `extra_protected_paths`에 넣어 가드가 수정 시 승인을 요구하게 한다. **이미 `config.local.json`이 있는 컴퓨터**는 clone 절대 경로 기준 `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh`를 `extra_protected_paths`에 직접 추가한 뒤 터미널에서 `install.py ... --apply`를 다시 실행해야 반영된다.
 
