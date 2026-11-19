@@ -1039,6 +1039,9 @@ def _command_writes(argv, text):
         if prog == "cp":
             recursive = _cluster_has(args, "rRa") or any(a in ("--recursive", "--archive") for a in args)
             cands += _copy_destinations(targets[-1:] or pos[-1:], pos if targets else pos[:-1], recursive)
+        elif prog == "install" and not (_cluster_has(args, "d") or "--directory" in args):
+            # install は再帰しない。宛先がディレクトリなら `宛先/basename(元)` に書く
+            cands += _copy_destinations(targets[-1:] or pos[-1:], pos if targets else pos[:-1], False)
         return cands, []
     if prog == "chmod":
         pos = [a for a in args if a != "--" and not re.fullmatch(r"-[RfvhHLPcEC]+|--[A-Za-z-]+(=.*)?", a)]
@@ -1437,6 +1440,10 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     # 長すぎる入力は以降の判定前に確認へ回す（C 実装の正規表現は期限切れで止められず、hook timeout で未判定実行になる。
     # 以降の処理は入力長に比例して重い）
     if len(cmd) > BASH_MAX_CHARS:
+        # 以降の deny 判定（AWS 操作・AWS_PROFILE 代入・相対パス等の秘密情報アクセス）を行えないため、
+        # aws コマンド・.aws パス要素を含むものは拒否する（どちらも線形時間の検索）
+        if re.search(r"\baws\b", cmd) or re.search(r"(?<![\w.-])\.aws(?![\w.-])", cmd):
+            return ("deny", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）うえ AWS 関連の操作を含むため拒否")
         return ("ask", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）ため確認が必要")
     # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
     # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す

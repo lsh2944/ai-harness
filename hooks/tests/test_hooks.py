@@ -645,6 +645,11 @@ class RelativeWriteTests(unittest.TestCase):
             ('install -m 644 /tmp/x hooks/guard.py', 'ask'),
             ('install -m 644 hooks/guard.py /tmp/x', None),
             ('install -d hooks/new', 'ask'),
+            # install も宛先ディレクトリ内の `宛先/basename(元)` を判定する（非再帰）
+            ('install /tmp/setup.sh .', 'ask'),
+            ('install -m 755 /tmp/setup.sh /tmp/apply.sh ./', 'ask'),
+            ('install -m 644 /tmp/x docs/', None),
+            ('install -m 644 /tmp/a /tmp/b .', None),
             ('rsync -a /tmp/x/ hooks/', 'ask'),
             ('rsync -a hooks/ /tmp/b/', None),
             ('rsync -a hooks/ host:/b/', None),
@@ -764,12 +769,27 @@ class RelativeWriteTests(unittest.TestCase):
                     self.assertEqual(self.g.check_bash(command, cwd=str(self.home))[0], 'deny')
                     self.assertLess(time.monotonic() - started, 1.0)
         # 上限判定の前の判定は、上限を大きく超える入力（1MB）でも線形時間で終わる
-        for unit in ('npm ', 'npm -', 'AWS_ROLE_ARN ', 'unset ', 'export ', 'cdk ', 'greengrass-cli ', 'aws ', '1'):
+        for unit in ('npm ', 'npm -', 'AWS_ROLE_ARN ', 'unset ', 'export ', 'cdk ', 'greengrass-cli ', 'aws ', '.aws/',
+                     '1'):
             with self.subTest(unit=unit):
                 text = (unit * (2 ** 20 // len(unit)))
                 started = time.monotonic()
-                self.assertEqual(self.g.check_bash(text, cwd=str(self.home))[0], 'ask')
+                expected = 'deny' if unit in ('aws ', '.aws/') else 'ask'
+                self.assertEqual(self.g.check_bash(text, cwd=str(self.home))[0], expected)
                 self.assertLess(time.monotonic() - started, 1.0)
+        # 上限超過で以降の deny 判定（aws 操作・AWS_PROFILE 代入・相対パスの秘密情報）を行えないものは、aws・.aws を含めば拒否
+        for tail in ('aws s3 rm s3://fake/x', 'AWS_PROFILE=other aws sts get-caller-identity',
+                     'cd ~/.aws && cat credentials', 'cat ../.aws/cli/x.json', 'timeout 5 aws lambda invoke --function-name f o'):
+            command = pad + tail
+            with self.subTest(tail=tail):
+                self.assertEqual(self.g.check_bash(command, cwd=str(self.home))[0], 'deny')
+        payload = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': pad + 'aws s3 rm s3://fake/x'},
+                              'cwd': str(self.home)})
+        for runtime in ('claude', 'codex'):
+            result = run_guard(payload, runtime, guard=self.guard_path)
+            self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        # aws を含まない長い命令は従来どおり承認（上記の echo）。aws を含む語でも単語でなければ対象外
+        self.assertEqual(self.g.check_bash(pad + 'echo awsome .awsrc', cwd=str(self.home))[0], 'ask')
         # 上限以下でも二乗時間の後戻りにならない入力（正規表現は C 実装で期限切れの割り込みが効かない）
         limit = self.g.BASH_MAX_CHARS
         for unit in ('find ', 'cd ', 'sed ', 'perl ', 'python ', 'unset ', 'xargs ', 'rsync ', 'greengrass-cli ',
