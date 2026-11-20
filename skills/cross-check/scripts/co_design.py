@@ -2952,9 +2952,9 @@ def capture_snapshot(data, resolved, first, last):
 
 
 def cmd_evidence_inspect(args):
-    """開始条件を満たした独立調査用。登録・保存・ID 割当は一切しない。"""
+    """独立調査用（Codex 初回提案と並行可、ロックなし）。登録・保存・ID 割当は一切しない。"""
     sid = sid_check(args.session)
-    with investigation_session(sid):
+    with inspection_session(sid):
         path = Path(args.file)
         if not path.is_absolute() or not _within(path.resolve(strict=True), PROJECT):
             raise Refused('inspection requires an absolute source path inside the current project')
@@ -4418,6 +4418,10 @@ def neutral_architect_prompt(output):
         '당신은 /cross-check debate P1-b의 독립 architect입니다. 다음은 중립 입력과 출력 계약의 경로·hash 메타데이터뿐입니다. '
         '메인의 사전 조사·제안이나 Codex 출력은 전달하지 않습니다.\n'
         + json.dumps(metadata, ensure_ascii=False, indent=1) + '\n'
+        # Codex は監視で Claude 側の作業経路を読めない。こちらも Codex 側の出力・他セッションを読まないよう明示する（強制ではない）。
+        f'Codex의 작업·출력과 다른 세션 산출물을 보지 않도록 {ARTIFACT_ROOT}/ 아래에서는 위 inputs·data 경로만 읽고, '
+        f'그 밖의 파일·디렉터리(이 세션의 work/·artifacts/codex/ 등 포함)는 읽거나 나열하지 마세요. '
+        f'{USER_TMP}/co-design-* 도 읽거나 나열하지 마세요.\n'
         '입력 3종과 선택 data를 직접 읽고 scope 허용 범위에서 현행 코드·호출부·계약 양쪽·근거 원문을 충실히 조사하세요. '
         '요구사항 매핑·설계 전문·대안과 조건·위험·필수 검증·미확인을 빠뜨리지 않고 독립적으로 판단하세요. '
         '파일별 관찰 범위·현재 전체 파일 SHA256·작업트리/확인 날짜/Git 상태를 기록하세요.\n'
@@ -4435,6 +4439,66 @@ def neutral_architect_prompt(output):
     )
 
 
+def _digest_ok(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _completed_proposal_call(session):
+    """完了した proposal 呼び出し記録を検査して返す（非公開成果物の検査は別）。"""
+    calls = session.get('calls')
+    if not isinstance(calls, list) or not calls or any(not isinstance(c, dict) for c in calls):
+        raise Refused('proposal call record is incomplete')
+    if any(c.get('execution') == 'running' for c in calls):
+        raise Refused('a Codex call is still recorded as running; investigation is not ready')
+    call = calls[-1]
+    started, ended = call.get('started_at'), call.get('ended_at')
+    valid_time = lambda value: type(value) in (int, float) and 0 < value < float('inf')
+    if (call.get('phase') != 'proposal' or type(call.get('index')) is not int or call['index'] != len(calls)
+            or not valid_time(started) or not valid_time(ended) or ended < started
+            or call.get('execution') != 'ok' or call.get('status') not in ('COMPLETE', 'INCOMPLETE')
+            or call.get('model_status') not in ('COMPLETE', 'INCOMPLETE')):
+        raise Refused('proposal call has not completed successfully or its record is incomplete')
+    return call
+
+
+def _neutral_inputs(sid, session):
+    """凍結入力・添付原資料の記録と実体を検査し、中立パス・ハッシュだけを返す。"""
+    inputs, data = session.get('inputs'), session.get('data', {})
+    data_meta = session.get('data_meta', {})
+    if (not isinstance(inputs, dict) or set(inputs) != set(INPUT_FILES)
+            or not all(_digest_ok(value) for value in inputs.values()) or not isinstance(data, dict)
+            or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', name) or not _digest_ok(value)
+                   for name, value in data.items()) or not isinstance(session.get('frozen'), dict)):
+        raise Refused('frozen input record is incomplete')
+    # ハッシュ記録だけが消え、原資料を次の調査へ渡し忘れる状態を拒否する。
+    data_dir = art(sid) / 'inputs/data'
+    if not isinstance(data_meta, dict) or set(data_meta) != set(data):
+        raise Refused('attached data records are inconsistent')
+    # 一覧取得前に入力本文の read_source で親経路の保護・symlink 検査も済ませる。
+    if verify_frozen(session):
+        raise Refused('frozen input integrity check failed')
+    if data_dir.is_symlink() or (data_dir.exists() and not data_dir.is_dir()):
+        raise Refused('attached data directory is invalid')
+    actual_data = {entry.name for entry in data_dir.iterdir()} if data_dir.is_dir() else set()
+    if actual_data != set(data):
+        raise Refused('attached data inventory does not match its frozen record')
+    return ({name: {'path': str(art(sid) / 'inputs' / INPUT_FILES[name]), 'sha256': digest}
+             for name, digest in inputs.items()},
+            {name: {'path': str(art(sid) / 'inputs/data' / name), 'sha256': digest}
+             for name, digest in data.items()})
+
+
+def _private_proposal_intact(sid, call):
+    for name, limit in (('result', MAX_RESULT), ('links', MAX_DOC * 4)):
+        expected = call.get(name + '_sha256')
+        path = call_file(sid, call, name + '.json')
+        if not _digest_ok(expected) or path is None:
+            raise Refused('private proposal artifacts or their integrity records are missing')
+        content, _, _ = read_source(path, limit, allow_session_files=True)
+        if sha256(content) != expected:
+            raise Refused('private proposal artifact integrity check failed')
+
+
 @contextmanager
 def investigation_session(sid):
     """開始検査と読み取りの間も同じ既存ロックを保持し、状態は変更しない。"""
@@ -4444,57 +4508,51 @@ def investigation_session(sid):
         session = load_session(sid)
         if session.get('sid') != sid or session.get('state') != 'CODEX_PROPOSED' or session.get('stop') is not None:
             raise Refused('investigation requires a completed proposal in CODEX_PROPOSED')
-        calls = session.get('calls')
-        if not isinstance(calls, list) or not calls or any(not isinstance(c, dict) for c in calls):
-            raise Refused('proposal call record is incomplete')
-        if any(c.get('execution') == 'running' for c in calls):
-            raise Refused('a Codex call is still recorded as running; investigation is not ready')
-        call = calls[-1]
-        started, ended = call.get('started_at'), call.get('ended_at')
-        valid_time = lambda value: type(value) in (int, float) and 0 < value < float('inf')
-        if (call.get('phase') != 'proposal' or type(call.get('index')) is not int or call['index'] != len(calls)
-                or not valid_time(started) or not valid_time(ended) or ended < started
-                or call.get('execution') != 'ok' or call.get('status') not in ('COMPLETE', 'INCOMPLETE')
-                or call.get('model_status') not in ('COMPLETE', 'INCOMPLETE')):
-            raise Refused('proposal call has not completed successfully or its record is incomplete')
-        inputs, data = session.get('inputs'), session.get('data', {})
-        data_meta = session.get('data_meta', {})
-        digest_ok = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
-        if (not isinstance(inputs, dict) or set(inputs) != set(INPUT_FILES)
-                or not all(digest_ok(value) for value in inputs.values()) or not isinstance(data, dict)
-                or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', name) or not digest_ok(value)
-                       for name, value in data.items()) or not isinstance(session.get('frozen'), dict)):
-            raise Refused('frozen input record is incomplete')
-        # ハッシュ記録だけが消え、原資料を次の調査へ渡し忘れる状態を拒否する。
-        data_dir = art(sid) / 'inputs/data'
-        if not isinstance(data_meta, dict) or set(data_meta) != set(data):
-            raise Refused('attached data records are inconsistent')
-        # 一覧取得前に入力本文の read_source で親経路の保護・symlink 検査も済ませる。
-        if verify_frozen(session):
-            raise Refused('frozen input integrity check failed')
-        if data_dir.is_symlink() or (data_dir.exists() and not data_dir.is_dir()):
-            raise Refused('attached data directory is invalid')
-        actual_data = {entry.name for entry in data_dir.iterdir()} if data_dir.is_dir() else set()
-        if actual_data != set(data):
-            raise Refused('attached data inventory does not match its frozen record')
-        for name, limit in (('result', MAX_RESULT), ('links', MAX_DOC * 4)):
-            expected = call.get(name + '_sha256')
-            path = call_file(sid, call, name + '.json')
-            if not digest_ok(expected) or path is None:
-                raise Refused('private proposal artifacts or their integrity records are missing')
-            content, _, _ = read_source(path, limit, allow_session_files=True)
-            if sha256(content) != expected:
-                raise Refused('private proposal artifact integrity check failed')
+        call = _completed_proposal_call(session)
+        inputs, data = _neutral_inputs(sid, session)
+        _private_proposal_intact(sid, call)
         # 非公開の結果・要約・問題・ログ・そのパスは出力に含めない。
         output = {'status': 'ok', 'ready': True, 'session': sid,
-                  'proposal_call': {'index': call['index'], 'ended_at': ended, 'model_status': call['model_status']},
-                  'inputs': {name: {'path': str(art(sid) / 'inputs' / INPUT_FILES[name]), 'sha256': digest}
-                             for name, digest in inputs.items()},
-                  'data': {name: {'path': str(art(sid) / 'inputs/data' / name), 'sha256': digest}
-                           for name, digest in data.items()}}
+                  'proposal_call': {'index': call['index'], 'ended_at': call['ended_at'],
+                                    'model_status': call['model_status']},
+                  'inputs': inputs, 'data': data}
         if call['model_status'] == 'INCOMPLETE':
             output['caveat'] = 'Codex model reported INCOMPLETE; investigation may proceed conditionally, not as verified completion.'
         yield session, output
+
+
+# 独立 architect が Codex の初回提案と並行して調査できる状態。凍結入力の後、Claude 提案の凍結前まで。
+INSPECT_STATES = ('INPUTS_FROZEN', 'CODEX_PROPOSED')
+
+
+@contextmanager
+def inspection_session(sid):
+    """evidence inspect 用の読み取り専用検査。Codex 呼び出し中もロックを取らずに使える。
+
+    session.json は一時ファイル+os.replace で原子的に保存されるので、ロックなしでも書きかけを読まない。
+    """
+    sid = sid_check(sid)
+    directory = session_dir(sid)
+    if directory.is_symlink() or not directory.is_dir():
+        raise Refused('unknown session')
+    session = load_session(sid)
+    if session.get('sid') != sid or session.get('stop') is not None or session.get('state') not in INSPECT_STATES:
+        raise Refused('inspection requires frozen inputs before the Claude proposal is frozen (INPUTS_FROZEN or CODEX_PROPOSED)')
+    if session['state'] == 'CODEX_PROPOSED':
+        _private_proposal_intact(sid, _completed_proposal_call(session))
+    _neutral_inputs(sid, session)
+    yield session
+
+
+def cmd_architect_prompt(args):
+    """入力凍結直後に、Codex 初回提案と並行して起動する独立 architect の固定委任文を返す。"""
+    sid = sid_check(args.session)
+    with locked_session(sid) as session:
+        require_state(session, 'INPUTS_FROZEN')
+        inputs, data = _neutral_inputs(sid, session)
+        output = {'status': 'ok', 'session': sid, 'inputs': inputs, 'data': data}
+        prompt = neutral_architect_prompt(output)
+        return dict(output, architect_prompt=prompt, architect_prompt_sha256=sha256(prompt.encode('utf-8'))), 0
 
 
 def cmd_investigation_ready(args):
@@ -4588,6 +4646,8 @@ def parser():
     p = sub.add_parser('investigation-ready', help='read-only: check proposal completion without revealing it or calling a model')
     p.add_argument('--session', required=True)
     p.add_argument('--architect-prompt', action='store_true', help='return a fixed neutral architect prompt only after the existing ready checks')
+    p = sub.add_parser('architect-prompt', help='read-only: fixed neutral architect prompt right after inputs are frozen (run before the proposal call)')
+    p.add_argument('--session', required=True)
     p = sub.add_parser('prune')
     p.add_argument('--apply', action='store_true',
                    help='delete expired temporary logs and legacy temporary evidence (default: list only)')
@@ -4604,7 +4664,8 @@ def cmd_evidence(args):
 COMMANDS = {'init': cmd_init, 'freeze-inputs': cmd_freeze_inputs, 'call': cmd_call, 'evidence': cmd_evidence,
             'freeze': cmd_freeze, 'proposal': cmd_proposal, 'reveal': cmd_reveal, 'ledger': cmd_ledger, 'synthesis': cmd_synthesis,
             'finalize': cmd_finalize, 'status': cmd_status, 'prune': cmd_prune, 'measure-request': cmd_measure_request,
-            'verify-codex': cmd_verify_codex, 'investigation-ready': cmd_investigation_ready}
+            'verify-codex': cmd_verify_codex, 'investigation-ready': cmd_investigation_ready,
+            'architect-prompt': cmd_architect_prompt}
 
 
 def run(argv=None):

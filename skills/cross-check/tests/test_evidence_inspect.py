@@ -80,9 +80,19 @@ class EvidenceInspectTests(SubmissionBase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 co.parser().parse_args(['evidence', 'inspect', '--session', 's', '--file', '/sample', *bounds])
 
-    def test_before_proposal_running_stopped_and_later_states_do_not_read_source(self):
+    def test_inputs_frozen_allows_inspection_even_while_proposal_call_runs(self):
+        # Codex 初回提案と並行する独立 architect 用: 入力凍結後は呼び出し実行中（running 記録）でも読める。
         source = self.env.project / 'src/app.py'
         sid = self.env.to_inputs_frozen()
+        self.assertEqual(self.inspect(sid, source, '--whole-file')['lines'], [1, 4])
+        session = self.env.session(sid)
+        running = {'index': 1, 'phase': 'proposal', 'started_at': 1.0, 'ended_at': None, 'execution': 'running'}
+        self.env.edit_session(sid, calls=session['calls'] + [running])
+        self.assertEqual(self.inspect(sid, source, '--lines', '2-3')['ref'], 'src/app.py:L2-L3')
+
+    def test_before_inputs_stopped_running_proposal_and_later_states_do_not_read_source(self):
+        source = self.env.project / 'src/app.py'
+        sid = self.env.init()
         self.inspect(sid, source, '--whole-file', expected=False)
         sid = self.proposed()
         original = copy.deepcopy(self.env.session(sid))
@@ -97,7 +107,14 @@ class EvidenceInspectTests(SubmissionBase):
             self.assertNotIn(str(source), [str(c.args[0]) for c in reads.call_args_list])
 
     def test_frozen_input_and_private_result_tampering_block_source_read(self):
-        for kind in ('input', 'result', 'links'):
+        for kind in ('input-before-proposal', 'input', 'result', 'links'):
+            if kind == 'input-before-proposal':
+                sid = self.env.to_inputs_frozen()
+                path = co.art(sid) / 'inputs/brief.md'
+                path.chmod(0o600)
+                path.write_text('changed')
+                self.inspect(sid, self.env.project / 'src/app.py', '--whole-file', expected=False)
+                continue
             sid = self.proposed()
             call = self.env.session(sid)['calls'][0]
             path = co.art(sid) / 'inputs/brief.md' if kind == 'input' else co.call_file(sid, call, kind + '.json')
@@ -108,10 +125,11 @@ class EvidenceInspectTests(SubmissionBase):
                 self.inspect(sid, source, '--whole-file', expected=False)
             self.assertNotIn(str(source), [str(c.args[0]) for c in reads.call_args_list])
 
-    def test_concurrent_lock_refuses_without_mutation(self):
-        sid = self.proposed()
-        with co.session_lock(sid):
-            self.inspect(sid, self.env.project / 'src/app.py', '--whole-file', expected=False)
+    def test_inspection_does_not_need_the_session_lock(self):
+        # Codex 呼び出しはロックを保持し続けるので、並行調査の inspect はロックなしで変更せずに読む。
+        for sid in (self.env.to_inputs_frozen(), self.proposed()):
+            with co.session_lock(sid):
+                self.inspect(sid, self.env.project / 'src/app.py', '--whole-file')
 
     def test_source_protections_and_project_boundary_are_preserved(self):
         sid = self.proposed()

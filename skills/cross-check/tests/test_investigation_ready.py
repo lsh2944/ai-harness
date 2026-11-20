@@ -452,5 +452,53 @@ class InvestigationRoutingTests(unittest.TestCase):
             self.assertIn(required, debate)
 
 
+class ParallelArchitectPromptTests(unittest.TestCase):
+    """入力凍結直後に委任文を得て、Codex 初回提案と並行して独立 architect を起動する経路。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='architect-prompt-test-')
+        self.env = fx.Env(self.temp.name)
+
+    def tearDown(self):
+        self.env.close()
+        self.temp.cleanup()
+
+    def test_prompt_after_inputs_frozen_matches_ready_prompt_and_forbids_codex_paths(self):
+        sid = self.env.to_inputs_frozen()
+        before = tree_snapshot(self.env.root)
+        with patch.object(co, 'find_codex', side_effect=AssertionError('find_codex')):
+            early = self.env.ok('architect-prompt', '--session', sid)
+        self.assertEqual(tree_snapshot(self.env.root), before)
+        prompt = early['architect_prompt']
+        self.assertEqual(early['architect_prompt_sha256'], co.sha256(prompt.encode('utf-8')))
+        self.assertIn(f'{co.ARTIFACT_ROOT}/ 아래에서는 위 inputs·data 경로만 읽고', prompt)
+        self.assertIn(f'{co.USER_TMP}/co-design-* 도 읽거나 나열하지', prompt)
+        self.assertEqual(self.env.calls(), [])
+        # 並行起動でも、後から完了検査で得る委任文と同一（中立入力だけに依存）。
+        self.env.ok('call', '--session', sid, '--phase', 'proposal')
+        ready = self.env.ok('investigation-ready', '--session', sid, '--architect-prompt')
+        self.assertEqual(ready['architect_prompt'], prompt)
+
+    def test_prompt_is_refused_outside_inputs_frozen_or_on_tamper(self):
+        output, code = self.env.run('architect-prompt', '--session', self.env.init())
+        self.assertEqual((output['status'], code), ('REFUSED', 2))
+        sid = self.env.to_inputs_frozen()
+        self.env.ok('call', '--session', sid, '--phase', 'proposal')
+        output, code = self.env.run('architect-prompt', '--session', sid)
+        self.assertEqual((output['status'], code), ('REFUSED', 2))
+        self.assertNotIn('architect_prompt', output)
+        sid = self.env.to_inputs_frozen()
+        path = co.art(sid) / 'inputs/brief.md'
+        path.chmod(0o600)
+        path.write_text('changed')
+        output, code = self.env.run('architect-prompt', '--session', sid)
+        self.assertEqual((output['status'], code), ('REFUSED', 2))
+        self.assertNotIn('architect_prompt', output)
+        sid = self.env.to_inputs_frozen()
+        self.env.edit_session(sid, state='STOPPED', stop={'category': 'POLICY'})
+        output, code = self.env.run('architect-prompt', '--session', sid)
+        self.assertEqual((output['status'], code), ('REFUSED', 2))
+
+
 if __name__ == '__main__':
     unittest.main()
