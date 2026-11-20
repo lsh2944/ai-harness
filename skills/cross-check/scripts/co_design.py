@@ -2854,8 +2854,9 @@ def validate_scope(scope):
     for path in scope['allowed_paths'] + scope['excluded_paths']:
         if not path.strip() or path.startswith('/') or '..' in path.split('/'):
             raise SchemaError('scope paths must be relative to the project root without ..')
-    if not scope['question'].strip() or not scope['allowed_paths']:
-        raise SchemaError('scope needs a question and at least one allowed path')
+    # allowed_paths は助言（ランナーは強制しない）。空配列は「リポジトリのコードを調べない」を表す。
+    if not scope['question'].strip():
+        raise SchemaError('scope needs a question')
     if scope['external_transfer'] == 'none' and set(scope['allowed_tools']) & {'web', 'context7'}:
         raise SchemaError('external_transfer none conflicts with web/context7 tools')
 

@@ -695,12 +695,27 @@ class SchemaTests(Base):
                       {'question': 'q', 'allowed_paths': ['../x'], 'excluded_paths': [], 'allowed_tools': [],
                        'external_transfer': 'none', 'notes': []},
                       {'question': 'q', 'allowed_paths': ['src'], 'excluded_paths': [], 'allowed_tools': ['node_repl'],
+                       'external_transfer': 'none', 'notes': []},
+                      {'question': '  ', 'allowed_paths': [], 'excluded_paths': [], 'allowed_tools': [],
+                       'external_transfer': 'none', 'notes': []},
+                      {'question': 'q', 'allowed_paths': [' '], 'excluded_paths': [], 'allowed_tools': [],
                        'external_transfer': 'none', 'notes': []}):
             with self.subTest(scope=scope):
                 path = self.env.file('scope.json', scope)
                 output, _ = self.env.run('freeze-inputs', '--session', sid, '--brief', brief, '--scope', path, '--index', index)
                 self.assertEqual(output['status'], 'INVALID')
         self.assertEqual(self.env.session(sid)['state'], 'INIT')
+
+    def test_scope_allows_empty_allowed_paths_for_no_code_questions(self):
+        # コード調査なしの質問は allowed_paths を空にできる（偽の経路を入れさせない）。
+        sid = self.env.init()
+        brief, _, index = self.env.inputs()
+        path = self.env.file('scope.json', {'question': 'q', 'allowed_paths': [], 'excluded_paths': ['src'],
+                                            'allowed_tools': ['web'], 'external_transfer': 'public-docs-queries-only',
+                                            'notes': []})
+        output, code = self.env.run('freeze-inputs', '--session', sid, '--brief', brief, '--scope', path, '--index', index)
+        self.assertEqual((output['status'], code), ('ok', 0), output)
+        self.assertEqual(self.env.session(sid)['state'], 'INPUTS_FROZEN')
 
 
 class DebatedMixin:
