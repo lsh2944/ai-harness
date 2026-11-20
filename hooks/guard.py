@@ -799,7 +799,7 @@ def check_harness_exec(cmd, cwd):
 # /dev/null への出力捨て・fd 複製（2>/dev/null・>&2 等）。数字列の途中から始めない（長い数字列で二乗時間にしない）
 DEVNULL_RE = re.compile(r"(?<!\d)\d*>>?\s*/dev/null\b|&>>?\s*/dev/null\b|(?<!\d)\d*>&\d+")
 REDIRECT_RE = re.compile(r">\s*[^&\s]|>&\s*[^\d\s&-]")
-WRITE_SIMPLE_RE = re.compile(r"\b(tee|cp|mv|chmod|ln|truncate)\b")
+WRITE_SIMPLE_RE = re.compile(r"\b(tee|cp|mv|chmod|ln|truncate|touch)\b")
 WRITE_ORDERED = (((r"\bsed\b", r"\s(-[A-Za-z]*i|--in-place)"), "[;&|]"),
                  ((r"\bperl\b", r"\s-[A-Za-z]*i"), "[;&|]"),
                  ((r"\bpython3?\b", r"(open|write|dump)"), "\n"))
@@ -811,7 +811,7 @@ def is_write_text(text):
 
 
 def legacy_write_text(text):
-    """リダイレクト以外の書き込みコマンド（tee・sed -i・cp・mv・chmod・ln・perl -i・python の書き込み・truncate）。"""
+    """リダイレクト以外の書き込みコマンド（tee・sed -i・cp・mv・chmod・ln・perl -i・python の書き込み・truncate・touch）。"""
     return bool(WRITE_SIMPLE_RE.search(text) or any(ordered_search(p, text) for p in WRITE_ORDERED))
 # hook 入力に cwd がないとき、相対パスの書き込み対象がこの名前（パス要素単位）を含めば承認対象にする
 FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
@@ -974,31 +974,146 @@ def _copy_destinations(target, sources, recursive):
     return out
 
 
-def _git_writes(args):
-    """git の作業ツリーを書き換えるサブコマンド（apply・checkout・restore・stash）の基準ディレクトリ。"""
-    k, base = 0, None
+GIT_TREE_SUBS = {"apply", "checkout", "restore", "stash", "reset", "pull", "merge", "switch", "rebase", "cherry-pick",
+                 "revert", "am"}
+# 作業開始時の同期（ai-harness/CLAUDE.md）として承認なしで許す pull の形（-C 以外のグローバルオプションなし）
+GIT_PULL_ALLOWED = (["--ff-only"], ["--ff-only", "origin", "main"])
+
+
+# pull の取得元・作業ツリーの位置・フックを変えられる設定キー（ハーネス内での書き込みは承認）
+GIT_CONFIG_GUARDED = re.compile(r"(remote|branch|pull|core|url|include|includeif)\.", re.I)
+GIT_CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool",
+                        "-l", "--list"}
+
+
+def _git_config_changes(sub, rest):
+    """remote・branch・config のうち、pull の取得元・上流・フック設定を書き換える操作なら True。"""
+    if sub == "remote":
+        return rest[:1] in (["add"], ["set-url"], ["rename"], ["remove"], ["rm"], ["set-branches"])
+    if sub == "branch":
+        return any(a in ("-u", "-t", "--track") or a.startswith(("--set-upstream-to", "--track=")) for a in rest)
+    if sub != "config":
+        return False
+    pos = _positional(rest, "f", ("--file", "--blob", "--type", "--default", "--comment", "--value"))
+    opts = [a for a in rest if a.startswith("-")]
+    verb = pos[0] if pos and pos[0] in ("set", "unset", "rename-section", "remove-section", "edit", "get",
+                                        "list") else None
+    if verb in ("get", "list") or any(o in GIT_CONFIG_READ_OPTS for o in opts):
+        return False
+    if verb in ("rename-section", "remove-section", "edit") or any(
+            o in ("-e", "--edit", "--rename-section", "--remove-section") for o in opts):
+        return True
+    keys = pos[1:] if verb else pos
+    write = verb in ("set", "unset") or len(keys) >= 2 or any(
+        o in ("--unset", "--unset-all", "--add", "--replace-all") for o in opts)
+    return write and bool(keys) and bool(GIT_CONFIG_GUARDED.match(keys[0]))
+
+
+def _git_writes(args, assigns=None):
+    """git の作業ツリーを書き換えるサブコマンド（GIT_TREE_SUBS）・pull の取得元を変える設定変更の基準ディレクトリ。
+    基準は -C（累積）の後に --work-tree（なければ環境変数 GIT_WORK_TREE）を適用した位置。"""
+    assigns = assigns or {}
+    k, cbase, worktree, gitdir = 0, None, None, assigns.get("GIT_DIR") or None
+    # GIT_DIR・GIT_CONFIG_* 等の環境変数でも pull の取得元・動作を変えられるため、GIT_ 代入があれば例外にしない
+    plain = not any(isinstance(n, str) and n.startswith("GIT_") for n in assigns)
     while k < len(args) and args[k].startswith("-"):
         a = args[k]
-        if a in ("-C", "--work-tree") and k + 1 < len(args):
-            # -C は累積、--work-tree は -C 適用後の位置から解釈される（絶対パスなら置き換え）
-            base = os.path.join(base or "", args[k + 1])
+        if a == "-C" and k + 1 < len(args):
+            cbase = os.path.join(cbase or "", args[k + 1])
+            k += 2
+            continue
+        plain = False  # -c 等で pull の動作（rebase・フック）を変えられるため、-C 以外があれば例外にしない
+        if a == "--work-tree" and k + 1 < len(args):
+            worktree = args[k + 1]
             k += 2
             continue
         if a.startswith("--work-tree="):
-            base = os.path.join(base or "", a.split("=", 1)[1])
+            worktree = a.split("=", 1)[1]
+        if a == "--git-dir" and k + 1 < len(args):
+            gitdir = args[k + 1]
+        elif a.startswith("--git-dir="):
+            gitdir = a.split("=", 1)[1]
         k += 2 if a in ("-c", "--git-dir", "--namespace", "--exec-path", "--config-env") else 1
+    if worktree is None and assigns.get("GIT_WORK_TREE"):
+        worktree = assigns["GIT_WORK_TREE"]
+    # --work-tree は -C 適用後の位置から解釈される（絶対パスなら置き換え）
+    base = os.path.join(cbase or "", worktree) if worktree else cbase
     sub = args[k] if k < len(args) else ""
     rest = args[k + 1:]
-    if sub not in ("apply", "checkout", "restore", "stash"):
+    if _git_config_changes(sub, rest):
+        # 設定は git ディレクトリに書かれるため、--git-dir・GIT_DIR の指定先（ハーネスの .git ならハーネス内）も判定する
+        return [], [(base, True)] + ([(os.path.join(cbase or "", gitdir), True)] if gitdir else [])
+    if sub not in GIT_TREE_SUBS:
         return [], []
     if sub == "stash" and rest[:1] in (["list"], ["show"]):
         return [], []
     if sub == "apply" and "--apply" not in rest and any(a in ("--check", "--stat", "--numstat", "--summary") for a in rest):
         return [], []
+    # reset は --hard・--merge・--keep のときだけ作業ツリーを書き換える（--soft・--mixed は HEAD・インデックスのみ）
+    if sub == "reset" and not any(a in ("--hard", "--merge", "--keep") for a in rest):
+        return [], []
+    if sub == "pull" and plain and rest in GIT_PULL_ALLOWED:
+        return [], []
     return [], [(base, True)]
 
 
-def _command_writes(argv, text):
+CURL_VALUE_SHORTS = "AbcCdDeEFHKmoPQrtTuUwxXyYz"
+CURL_VALUE_LONGS = ("--output", "--output-dir", "--cookie-jar", "--dump-header", "--header", "--data", "--data-raw",
+                    "--data-binary", "--data-urlencode", "--form", "--request", "--user", "--user-agent", "--referer",
+                    "--cookie", "--upload-file", "--proxy", "--config", "--max-time", "--write-out", "--range")
+WGET_VALUE_SHORTS = "ABDeiloOPQRtTUwa"
+WGET_VALUE_LONGS = ("--output-document", "--output-file", "--append-output", "--directory-prefix", "--execute",
+                    "--input-file", "--user-agent", "--tries", "--timeout", "--level", "--accept", "--reject",
+                    "--domains", "--base", "--quota", "--wait", "--header", "--user", "--password", "--post-data",
+                    "--referer")
+
+
+def _url_basename(url):
+    """URL のパス末尾のファイル名（curl -O・wget の既定の保存名）。スキームなしは最初の / までをホストとみなす。"""
+    path = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url)
+    path = path.split("/", 1)[1] if "/" in path else ""
+    return os.path.basename(re.split(r"[?#]", path)[0])
+
+
+def _under(directory, value):
+    """保存ディレクトリ指定（curl --output-dir・wget -P）があれば、その配下の位置を候補にする。
+    絶対パスの扱い（そのまま使うか前に付けるか）は実装依存のため、両方を候補にする。"""
+    if not directory:
+        return [value]
+    plain = value if value.startswith(("/", "~")) else os.path.join(directory, value)
+    return list(dict.fromkeys((plain, os.path.join(directory, value.lstrip("/")))))
+
+
+# wget の保存先にサーバー側のパスを再現し得るオプション（-nH・--cut-dirs と組み合わせると URL のパスがそのまま保存先になる）
+WGET_TREE_LONGS = ("--recursive", "--mirror", "--force-directories", "--page-requisites")
+
+
+def _download_writes(prog, args):
+    """curl・wget の書き込み対象。保存名が URL・応答で決まる場合は保存ディレクトリも展開先として判定する。"""
+    if prog == "curl":
+        outdir = (_option_values(args, "", ("--output-dir",)) or [None])[-1]
+        cands = [(p, True, False) for v in _option_values(args, "o", ("--output",)) for p in _under(outdir, v)]
+        cands += [(v, True, False) for v in _option_values(args, "cD", ("--cookie-jar", "--dump-header"))]
+        trees = [(outdir, False)] if outdir else []
+        remote = _cluster_has(args, "OJ") or any(
+            a in ("--remote-name", "--remote-name-all", "--remote-header-name") for a in args)
+        if not remote:
+            return cands, trees
+        urls = _positional(args, CURL_VALUE_SHORTS, CURL_VALUE_LONGS) + _option_values(args, "", ("--url",))
+        names = [_url_basename(u) for u in dict.fromkeys(urls)]
+        return cands + [(p, True, False) for n in names if n for p in _under(outdir, n)], trees or [(None, False)]
+    cands = [(v, True, False) for v in _option_values(args, "Ooa", ("--output-document", "--output-file",
+                                                                     "--append-output"))]
+    if _option_values(args, "O", ("--output-document",)):
+        return cands, []
+    prefix = (_option_values(args, "P", ("--directory-prefix",)) or [None])[-1]
+    names = [_url_basename(u) or "index.html" for u in _positional(args, WGET_VALUE_SHORTS, WGET_VALUE_LONGS)]
+    # 再帰・ディレクトリ再現では保存先が URL のパスで決まるため、保存先が保護パスの上位・ハーネス内でも承認
+    tree = _cluster_has(args, "rxpm") or any(a.startswith(WGET_TREE_LONGS) for a in args)
+    return cands + [(p, True, False) for n in names for p in _under(prefix, n)], [(prefix, tree)]
+
+
+def _command_writes(argv, text, assigns=None):
     """コマンドごとの書き込み対象。対象コマンドでなければ None。
     戻り値は (候補 [(値, 厳密, 祖先判定)], 展開先 [(ディレクトリ値 or None=実行ディレクトリ, ハーネス内も対象)])。
     厳密: 未展開の変数を含むとき実行ディレクトリがハーネス内なら承認（スクリプト・コードの引数は対象外）。
@@ -1060,10 +1175,10 @@ def _command_writes(argv, text):
             return [], []
         recursive = _cluster_has(args, "ra") or any(a in ("--recursive", "--archive") for a in args)
         return [(pos[-1], True, False)] + _copy_destinations(pos[-1:], pos[:-1], recursive), []
-    if prog == "curl":
-        return [(v, True, False) for v in _option_values(args, "o", ("--output",))], []
-    if prog == "wget":
-        return [(v, True, False) for v in _option_values(args, "O", ("--output-document",))], []
+    if prog in ("curl", "wget"):
+        return _download_writes(prog, args)
+    if prog == "touch":
+        return [(v, True, False) for v in _positional(args, "Adrt", ("--date", "--reference", "--time"))], []
     if prog == "patch":
         outputs = _option_values(args, "o", ("--output",))
         pos = _positional(args, "dopiFrDBVYzgx", ("--directory", "--output", "--strip", "--input", "--fuzz",
@@ -1073,7 +1188,7 @@ def _command_writes(argv, text):
         dirs = _option_values(args, "d", ("--directory",))
         return [(v, True, False) for v in outputs + pos[:1]], [(d, True) for d in dirs] or [(None, True)]
     if prog == "git":
-        return _git_writes(args)
+        return _git_writes(args, assigns)
     if prog in ("tar", "bsdtar", "gtar"):
         old_style = bool(args) and re.fullmatch(r"[A-Za-z]+", args[0]) and "x" in args[0]
         if not (old_style or "--extract" in args or "--get" in args or any(
@@ -1124,9 +1239,9 @@ def _segment_writes(seg, state):
         simple.append(w)
     while simple and simple[0] in SHELL_LEADERS:
         simple.pop(0)
-    _, argv = strip_prefix(simple)
+    assigns, argv = strip_prefix(simple)
     if argv and not pending:
-        result = _command_writes(argv, clean)
+        result = _command_writes(argv, clean, assigns)
         if result is not None:
             cands += result[0]
             trees += result[1]
@@ -1137,8 +1252,8 @@ def _segment_writes(seg, state):
     return (cands, trees) if cands or trees else None
 
 
-WRITE_PROGS = {"tee", "sed", "perl", "cp", "ln", "mv", "install", "chmod", "truncate", "dd", "rsync", "curl", "wget",
-               "patch", "git", "tar", "bsdtar", "gtar", "unzip", "python", "python3"}
+WRITE_PROGS = {"tee", "sed", "perl", "cp", "ln", "mv", "install", "chmod", "truncate", "touch", "dd", "rsync", "curl",
+               "wget", "patch", "git", "tar", "bsdtar", "gtar", "unzip", "python", "python3"}
 
 
 def _in_harness(path):
@@ -1184,7 +1299,7 @@ def _check_write_target(value, strict, ancestor, state):
 
 
 def _check_tree(value, harness, state):
-    """展開・パッチ適用・git 作業ツリー変更の基準ディレクトリが保護パスの中（git・patch は上位・ハーネス内も）なら承認。"""
+    """展開・ダウンロード保存・パッチ適用・git 作業ツリー変更の基準ディレクトリが保護パスの中（git・patch は上位・ハーネス内も）なら承認。"""
     if value is None:
         if state.unknown:
             return ("ask", "実行ディレクトリが確定できないため展開・パッチ適用は確認が必要")
@@ -1204,7 +1319,7 @@ def _check_tree(value, harness, state):
                 return ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要")
             dirs += paths
     for d in dirs:
-        # 展開（tar・unzip）は保護ディレクトリ内のみ。git・patch は書き込み先が引数に現れないため上位・ハーネス内も
+        # 展開（tar・unzip）・ダウンロード保存先（curl・wget）は保護ディレクトリ内のみ。git・patch は書き込み先が引数に現れないため上位・ハーネス内も
         if is_protected_write(d) or (harness and (_protected_ancestor(d) or _in_harness(d))):
             return ("ask", f"保護パスを含む場所での展開・パッチ適用・作業ツリー変更: {d}")
     return None

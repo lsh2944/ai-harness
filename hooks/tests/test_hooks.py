@@ -702,6 +702,123 @@ class RelativeWriteTests(unittest.TestCase):
         self.check([('patch -p1 < /tmp/x.patch', None), ('git stash', None), ('tar -xzf /tmp/a.tgz', None),
                     (f'git -C {h} stash', 'ask'), (f'patch -d {h}/docs -p1 < /tmp/x.patch', 'ask')], other)
 
+    def test_git_tree_touch_and_download_writes(self):
+        h = str(self.home)
+        self.check([
+            # git の作業ツリー変更（ハーネス内は承認）。作業開始時の pull --ff-only だけは例外
+            ('git reset --hard', 'ask'),
+            ('git reset --hard HEAD~1', 'ask'),
+            ('git reset --keep origin/main', 'ask'),
+            ('git reset', None),
+            ('git reset --soft HEAD~1', None),
+            ('git reset -- hooks/guard.py', None),
+            ('git pull', 'ask'),
+            ('git pull --rebase', 'ask'),
+            ('git pull --ff-only upstream feature', 'ask'),
+            ('git -c pull.rebase=true pull --ff-only', 'ask'),
+            ('git pull --ff-only', None),
+            ('git pull --ff-only origin main', None),
+            ('git merge origin/main', 'ask'),
+            ('git switch other', 'ask'),
+            ('git rebase origin/main', 'ask'),
+            ('git cherry-pick abc123', 'ask'),
+            ('git revert --no-commit abc123', 'ask'),
+            ('git am /tmp/x.patch', 'ask'),
+            ('git log --oneline -5', None),
+            ('git commit -m x', None),
+            # touch（-r・-t・-d の値は対象外）
+            ('touch hooks/guard.py', 'ask'),
+            ('touch setup.sh', 'ask'),
+            ('touch hooks/new.py', 'ask'),
+            ('touch -r /tmp/ref hooks/guard.py', 'ask'),
+            ('touch -r hooks/guard.py docs/x.md', None),
+            ('touch docs/new.md', None),
+            ('find /tmp -name x -exec touch hooks/guard.py \\;', 'ask'),
+            # curl の URL 由来の保存名・保存ディレクトリ・cookie jar・ヘッダー出力
+            ('curl -O https://example.com/a/setup.sh', 'ask'),
+            ('curl -sSLO https://example.com/setup.sh?x=1', 'ask'),
+            ('curl --remote-name-all https://example.com/a https://example.com/setup.sh', 'ask'),
+            ('curl -O --output-dir hooks https://example.com/x', 'ask'),
+            ('curl -OJ --output-dir=tools/aws https://example.com/x', 'ask'),
+            ('curl --output-dir hooks -o x https://example.com/x', 'ask'),
+            ('curl -c hooks/jar https://example.com/', 'ask'),
+            ('curl -D setup.sh https://example.com/', 'ask'),
+            ('curl -O https://example.com/notes.txt', None),
+            ('curl -H "X-A: b" -O https://example.com/notes.txt', None),
+            ('curl --output-dir /tmp -O https://example.com/setup.sh', None),
+            ('curl -s https://example.com/setup.sh', None),
+            # wget の既定保存名・-P・ログ出力
+            ('wget https://example.com/setup.sh', 'ask'),
+            ('wget -q example.com/dl/setup.sh', 'ask'),
+            ('wget -P hooks https://example.com/x', 'ask'),
+            ('wget --directory-prefix=tools/aws https://example.com/x', 'ask'),
+            ('wget -r -P hooks https://example.com/', 'ask'),
+            ('wget -o setup.sh https://example.com/x', 'ask'),
+            ('wget https://example.com/notes.txt', None),
+            ('wget -P /tmp https://example.com/setup.sh', None),
+            ('wget -O /tmp/x https://example.com/setup.sh', None),
+            ('wget -qO- https://example.com/setup.sh', None),
+        ], h)
+        # 保護ディレクトリ内では保存名が分からなくても承認
+        self.check([('curl -OJ https://example.com/x', 'ask'), ('wget https://example.com/', 'ask'),
+                    ('curl -s https://example.com/x', None)], h + '/hooks')
+        # ハーネス外の git 作業ツリー変更は対象外。-C でハーネスを指せば判定し、-C 以外のグローバルオプションでは例外にしない
+        other = str(self.other)
+        self.check([('git reset --hard', None), ('git pull', None), ('wget https://example.com/setup.sh', None),
+                    (f'git -C {h} reset --hard', 'ask'), (f'git -C {h} pull', 'ask'),
+                    (f'git -C {h} pull --ff-only', None), (f'git --work-tree={h} pull --ff-only', 'ask')], other)
+
+    def test_git_env_config_and_download_tree_bypasses(self):
+        h = str(self.home)
+        self.check([
+            # GIT_ 環境変数の代入では pull --ff-only を例外にしない
+            ('GIT_DIR=/tmp/clone/.git git pull --ff-only', 'ask'),
+            ('env GIT_CONFIG_PARAMETERS=x git pull --ff-only', 'ask'),
+            # pull の取得元・上流・フック設定の変更
+            ('git remote set-url origin /tmp/evil', 'ask'),
+            ('git remote add evil /tmp/evil', 'ask'),
+            ('git branch -u evil/main', 'ask'),
+            ('git branch --set-upstream-to=evil/main', 'ask'),
+            ('git config branch.main.remote evil', 'ask'),
+            ('git config --local core.hooksPath /tmp/h', 'ask'),
+            ('git config set remote.origin.url /tmp/e', 'ask'),
+            ('git config --unset core.hooksPath', 'ask'),
+            ('git config url./tmp/e.insteadOf https://github.com/', 'ask'),
+            ('git config --remove-section remote.origin', 'ask'),
+            ('git remote -v', None),
+            ('git remote get-url origin', None),
+            ('git branch -a', None),
+            ('git branch --show-current', None),
+            ('git config core.hooksPath', None),
+            ('git config --get remote.origin.url', None),
+            ('git config --list', None),
+            ('git config --local user.name x', None),
+            # wget の再帰・ディレクトリ再現は保存先がハーネス内なら承認
+            ('wget -x -nH https://example.com/hooks/evil.py', 'ask'),
+            ('wget -r -nH https://example.com/hooks/guard.py', 'ask'),
+            ('wget --mirror https://example.com/', 'ask'),
+            ('wget -r -P /tmp/site https://example.com/', None),
+            # curl --output-dir は -o の絶対パスにも前置され得る。--url= 形式の URL も保存名を判定
+            ('curl --output-dir hooks -o /tmp/x https://example.com/', 'ask'),
+            ('curl -O --url=https://example.com/setup.sh', 'ask'),
+            ('curl --output-dir /tmp -o x https://example.com/', None),
+        ], h)
+        self.check([('wget -r https://example.com/', 'ask')], h + '/docs')
+        other = str(self.other)
+        self.check([
+            (f'GIT_WORK_TREE={h} git reset --hard', 'ask'),
+            (f'git --git-dir={h}/.git --work-tree={h} checkout .', 'ask'),
+            (f'git -C {h} remote set-url origin /tmp/e', 'ask'),
+            (f'git -C {h} config core.hooksPath /tmp/h', 'ask'),
+            (f'git --git-dir={h}/.git config remote.origin.url /tmp/evil', 'ask'),
+            (f'GIT_DIR={h}/.git git config branch.main.remote evil', 'ask'),
+            (f'git --git-dir={h}/.git log --oneline', None),
+            ('git remote set-url origin /tmp/e', None),
+            ('git config core.hooksPath x', None),
+            ('GIT_WORK_TREE=/tmp/w git reset --hard', None),
+            ('wget -r https://example.com/', None),
+        ], other)
+
     def test_moving_or_changing_protected_ancestors(self):
         h = str(self.home)
         parent, name = os.path.split(h)
