@@ -2429,6 +2429,59 @@ class SupplyAndResilienceTests(Base):
         output, code = self.env.run('verify-codex')
         self.assertEqual((output['status'], code), ('PASS', 0), output)
         self.assertEqual(output['warnings'], [])
+        self.assertNotIn('attempts', output)
+        self.assertEqual(self.env.calls(), ['verify'])
+
+    # プローブ実行後に止まる（11/20 実測の停滞形）。first_only なら 1 回目の点検だけ止まる。
+    STALL = ("if {first_only} is False or open(str(HERE) + '.calls').read().split().count('verify') == 1:\n"
+             "    time.sleep(30)\n")
+
+    def test_stalled_verify_retries_once_and_records_warning(self):
+        gate = self.env.artifacts / 'verified_codex_version'
+        gate.write_text('codex-cli 9.9.9\n')
+        self.env.behaviors({'verify': self.STALL.format(first_only=True)})
+        with patch.object(co, 'VERIFY_TIMEOUT', 2):
+            output = self.env.ok('init', '--question-id', 'q')
+        verification = output['codex_verification']
+        self.assertEqual(verification['status'], 'PASS', verification)
+        self.assertEqual(self.env.calls(), ['verify', 'verify'])
+        self.assertEqual([a['status'] for a in verification['attempts']], ['FAIL', 'PASS'])
+        self.assertIn('timed out after 2s', verification['attempts'][0]['problems'])
+        self.assertTrue(any('passed on the single retry' in w for w in verification['warnings']))
+        self.assertEqual(gate.read_text().strip(), fx.VERSION)
+        recorded = json.loads((self.env.artifacts / 'verified_codex_version.json').read_text())
+        self.assertEqual(len(recorded['attempts']), 2)
+
+    def test_repeated_stall_refuses_after_single_retry(self):
+        gate = self.env.artifacts / 'verified_codex_version'
+        gate.write_text('codex-cli 9.9.9\n')
+        self.env.behaviors({'verify': self.STALL.format(first_only=False)})
+        with patch.object(co, 'VERIFY_TIMEOUT', 2):
+            output, code = self.env.run('init', '--question-id', 'q')
+        self.assertEqual((output['status'], code), ('REFUSED', 2))
+        self.assertIn('still failing after the single retry', output['error'])
+        self.assertEqual(self.env.calls(), ['verify', 'verify'])
+        self.assertEqual(gate.read_text().strip(), 'codex-cli 9.9.9')
+
+    def test_non_stall_failures_are_not_retried(self):
+        # hook 不在・形の変化・タイムアウト中の想定外 item は再試行しない（隠さない）。
+        gate = self.env.artifacts / 'verified_codex_version'
+        gate.write_text('codex-cli 9.9.9\n')
+        cases = ('deny = False',
+                 "tool('v2', 'echo x', co_secret)",
+                 "emit({'type': 'turn.failed'})",
+                 "emit({'type': 'item.completed', 'item': {'id': 'f1', 'type': 'file_change', 'status': 'completed'}})\n"
+                 + self.STALL.format(first_only=False),
+                 "tool('v2', 'echo x', co_secret)\n" + self.STALL.format(first_only=False))
+        for behavior in cases:
+            with self.subTest(behavior=behavior[:30]):
+                Path(str(self.env.fake) + '.calls').unlink(missing_ok=True)
+                self.env.behaviors({'verify': f'co_secret = {co.VERIFY_SECRET!r}\n' + behavior})
+                with patch.object(co, 'VERIFY_TIMEOUT', 2):
+                    output, code = self.env.run('init', '--question-id', 'q')
+                self.assertEqual((output['status'], code), ('REFUSED', 2))
+                self.assertEqual(self.env.calls(), ['verify'])
+                self.assertEqual(gate.read_text().strip(), 'codex-cli 9.9.9')
 
     def test_search_flag_only_when_web_allowed(self):
         command = co.build_command('codex', Path('s.json'), Path('r.json'), web=True)

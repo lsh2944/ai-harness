@@ -672,7 +672,10 @@ def verified_version():
 
 # ---------------------------------------------------------------- 版ゲートの自動点検
 # Codex 更新ごとの手動 E2E の代わりに、無害な 1 回の呼び出しで監視の前提を確かめてから版を記録する。
-VERIFY_TIMEOUT = 240
+# 1 回あたりの上限。2026-11-20 の実測では成功 23 秒、停滞は 240 秒待っても進まなかった。
+# 停滞形の失敗だけ 1 回再試行するので、最悪でも従来の 240 秒と同じ。
+VERIFY_TIMEOUT = 120
+VERIFY_ATTEMPTS = 2
 VERIFY_MARKER = 'cross-check-probe-ok'
 # 実際の秘密ファイルは読まない。guard hook が文字列だけで拒否することを確かめる（本ファイルに経路形を残さない）。
 VERIFY_SECRET = '~/.aws/' + 'credentials'
@@ -688,8 +691,8 @@ VERIFY_COMMAND_KEYS = {'aggregated_output', 'command', 'exit_code', 'id', 'statu
 VERIFY_FORBIDDEN_NAMES = ('node_repl', 'cua_repl', 'image_gen', 'imagegen', 'spawn_agent', 'codex_apps')
 
 
-def verify_codex(codex, version):
-    """無害な点検呼び出し 1 回で、hook 拒否・イベント形・道具露出を確かめる。PASS なら版を記録する。
+def _verify_once(codex, version):
+    """無害な点検呼び出し 1 回で、hook 拒否・イベント形・道具露出を確かめる。記録はしない。(record, stalled) を返す。
     確かめる内容: 無効化キー付きで起動できる（キーが効いたことまでは保証しない）、上位イベント・item 型が許可リスト内、
     シェル item の形が E2E-3 と同じ、秘密経路を含む命令が stderr の hook 拒否行で止まり実行されない。
     禁止道具（cua_repl 等）の露出は監視が停止させるので警告として記録する。"""
@@ -779,7 +782,33 @@ def verify_codex(codex, version):
     record = {'status': 'FAIL' if problems else 'PASS', 'version': version, 'checked_at': iso(now()),
               'elapsed_seconds': round(time.monotonic() - started, 2), 'usage': usage,
               'problems': sorted(set(problems)), 'warnings': sorted(set(warnings)), 'log_dir': str(work)}
-    if not problems:
+    # 停滞形: 時間切れで、プローブは期待どおり実行され、秘密経路の命令は実行されず、
+    # 時間切れに伴う 3 種以外の問題（想定外イベント・item・error・形の変化など）がない場合だけ。
+    stall_only = {f'timed out after {VERIFY_TIMEOUT}s', 'missing turn.completed event',
+                  'hook denial line for the secret-path probe not found in stderr (guard hook inactive or denial format changed)'}
+    stalled = timed_out and probe_ok and not secret_ran and set(problems) <= stall_only
+    return record, stalled
+
+
+def verify_codex(codex, version):
+    """点検を行い PASS なら版を記録する。停滞形の失敗に限り 1 回だけ再試行し、その経緯を記録と警告に残す。"""
+    attempts = []
+    while True:
+        record, stalled = _verify_once(codex, version)
+        attempts.append(record)
+        if record['status'] == 'PASS' or not stalled or len(attempts) >= VERIFY_ATTEMPTS:
+            break
+    if len(attempts) > 1:
+        record = dict(record, attempts=[{key: a[key] for key in ('status', 'elapsed_seconds', 'problems', 'log_dir')}
+                                        for a in attempts])
+        if record['status'] == 'PASS':
+            # 再試行で通ったことを黙って記録しない（hook の間欠的な停滞を隠さない）。
+            record['warnings'] = sorted(set(record['warnings']) | {
+                f'first automatic check stalled ({attempts[0]["log_dir"]}); passed on the single retry. '
+                'If this repeats, check the Codex guard hook.'})
+        else:
+            record['problems'] = sorted(set(record['problems']) | {'still failing after the single retry for a stall'})
+    if record['status'] == 'PASS':
         ensure_dir(ARTIFACT_ROOT)
         write_private(ARTIFACT_ROOT / 'verified_codex_version', (version + '\n').encode('utf-8'))
         write_private(ARTIFACT_ROOT / 'verified_codex_version.json', dump(record))

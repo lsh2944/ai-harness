@@ -120,7 +120,7 @@ Claude와 Codex가 같은 중립 입력으로 **각자 조사·설계한 뒤** �
 
 ## 버전 게이트·보존
 
-- `init`은 `codex --version`이 `<작업 루트>/.local/co-design/verified_codex_version`과 다르면 **자동 점검**(무해한 Codex 호출 1회, 상한 240초)을 돌리고 PASS일 때만 이 파일과 `verified_codex_version.json`(점검 시각·usage·경고·로그 경로)을 갱신해 계속한다. FAIL이면 이유와 로그 경로(`<USER_TMP>/co-design-verify-*`)를 담아 거부하고 기록은 바꾸지 않는다. `--no-auto-verify`는 예전처럼 바로 거부하고, `python3 $S verify-codex`는 지금 점검만 한다(task-metrics 기록 대상 아님, 결과 usage는 출력에 있음).
+- `init`은 `codex --version`이 `<작업 루트>/.local/co-design/verified_codex_version`과 다르면 **자동 점검**(무해한 Codex 호출 1회, 상한 120초)을 돌리고 PASS일 때만 이 파일과 `verified_codex_version.json`(점검 시각·usage·경고·로그 경로)을 갱신해 계속한다. **멈춤 형태의 실패만 1회 자동 재시도한다**: 시간 초과이고, 첫 probe 명령은 정상 실행됐고, 비밀 경로 명령은 실행되지 않았고, 문제가 시간 초과에 따르는 3종(시간 초과·`turn.completed` 없음·hook 거부 행 없음)뿐일 때다. 그 밖의 실패(hook 미작동·비밀 경로 실행·예상 밖 이벤트/item·`error`/`turn.failed`·형식 변화)는 재시도하지 않는다. 재시도로 PASS하면 `attempts`(시도별 상태·시간·문제·로그)와 경고를 기록·출력하므로 메인은 경고를 사용자에게 알린다. 재시도도 실패하면 FAIL이다(최악 240초). FAIL이면 이유와 로그 경로(`<USER_TMP>/co-design-verify-*`)를 담아 거부하고 기록은 바꾸지 않는다. `--no-auto-verify`는 예전처럼 바로 거부하고, `python3 $S verify-codex`는 지금 점검만 한다(task-metrics 기록 대상 아님, 결과 usage는 출력에 있음).
   - 점검 내용: 도구 비활성화 키로 기동(exit 0·`turn.completed`), 상위 이벤트·item type이 허용 목록 안(`error`·`turn.failed` 없음), 셸 item 키가 E2E-3과 같음(`aggregated_output, command, exit_code, id, status, type`), 비밀 경로 문자열을 `echo`하는 명령이 실행되지 않고 stderr에 hook 거부 행이 남음(Codex 업데이트로 hook 신뢰가 풀린 경우도 여기서 잡힌다). 금지 도구(cua_repl 등)가 노출되면 감시가 정지시키므로 경고로만 남긴다.
   - 점검하지 않는 것: 독립성 마커·출력 경로 판정(러너 코드 쪽 논리라 단위 테스트로 확인), `--search` 동작, 장시간 호출의 timeout 처리. 이벤트 형태가 크게 바뀐 업데이트라면 FAIL 이유를 보고 수동 E2E로 보완한다.
 - 산출물 `<작업 루트>/.local/co-design/<sid>/artifacts/`는 사용자가 결정할 때까지 보관하고 자동 삭제하지 않는다(결정되면 `docs/`로 옮긴다).
