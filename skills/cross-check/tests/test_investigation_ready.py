@@ -452,6 +452,25 @@ class InvestigationRoutingTests(unittest.TestCase):
             self.assertIn(required, debate)
 
 
+class ParallelFlowDocTests(unittest.TestCase):
+    def test_documents_parallel_start_stop_on_codex_failure_and_capture(self):
+        # 並行起動の手順の脱落を検出する文書回帰のみ（実 Claude の遵守は検証しない）。
+        skill = (SKILL / 'SKILL.md').read_text()
+        debate = (SKILL / 'references/debate.md').read_text()
+        handoff = (SKILL / 'references/architect-handoff.md').read_text()
+        proposal = next(line for line in debate.splitlines() if line.startswith('| P1-a Codex |'))
+        main = next(line for line in debate.splitlines() if line.startswith('| P1-b 메인 |'))
+        self.assertIn('architect-prompt --session <sid>', skill)
+        self.assertIn('호출 전에 받는다', proposal)
+        self.assertLess(proposal.index('architect-prompt'), proposal.index('--phase proposal'))
+        self.assertIn('두 작업의 종료 알림을 모두 기다린다', proposal)
+        self.assertIn('architect를 즉시 중지(TaskStop)', proposal)
+        self.assertIn('proposal capture --session <sid> --agent-output', main)
+        self.assertIn('Codex 제안과 architect가 모두 끝난 뒤', main)
+        self.assertIn('proposal capture --agent-output', handoff)
+        self.assertNotIn('`output_file`이 빈 문자열', debate)
+
+
 class ParallelArchitectPromptTests(unittest.TestCase):
     """入力凍結直後に委任文を得て、Codex 初回提案と並行して独立 architect を起動する経路。"""
 

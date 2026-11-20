@@ -9,11 +9,11 @@ argument-hint: "[검토할 내용] [--review | --frozen-critique | --test-plan |
 
 사용자 요청: $ARGUMENTS
 
-**debate 조사 시작 잠금:** P0·P1-a에서 메인은 중립 입력·필수 규칙·경로/상태 메타데이터만 준비한다. 대상 파일이 작거나 경로를 이미 알아도 코드·테스트·diff·로그·구현 문서 본문을 Read/Bash/Grep으로 먼저 확인하지 않는다. Codex background 실행 중에도 조사하지 않는다. 최초 코드 조사는 완료 검사 뒤의 새 architect만 담당하고, 메인의 본문 대조는 P2 공개 뒤에 한다. 기존 전체 조사·추론·계약 확인·검증 기준은 유지한다.
+**debate 조사 시작 잠금:** P0·P1-a에서 메인은 중립 입력·필수 규칙·경로/상태 메타데이터만 준비한다. 대상 파일이 작거나 경로를 이미 알아도 코드·테스트·diff·로그·구현 문서 본문을 Read/Bash/Grep으로 먼저 확인하지 않는다. 메인은 Codex background 실행 중에도 조사하지 않는다. 최초 코드 조사는 `architect-prompt` 고정 위임문을 받은 새 architect만 Codex 제안과 동시에 담당하고, 메인의 본문 대조는 P2 공개 뒤에 한다. 기존 전체 조사·추론·계약 확인·검증 기준은 유지한다.
 
-`investigation-ready --session <sid> --architect-prompt`의 성공과 `ready:true`를 확인한 뒤 반환 `architect_prompt`를 새 architect의 prompt로 **그대로** 전달한다. [JSON 출력 계약](references/architect-handoff.md) 경로도 그 문자열 안에 있다. 메인이 구현 대안·의사코드·버그 설명·요구사항 재해석·새 설명을 추가하거나 위임문을 재작성하지 않는다. 메인은 응답을 원문 그대로 저장하며 인계 오류를 근거 삭제·의미 재작성으로 복구하지 않고 중단·보고한다. prepare 성공 후 초안 변경은 runner가 동결 전에 거부한다.
+입력 동결 직후(Codex 호출 전) `architect-prompt --session <sid>`가 반환한 `architect_prompt`를 새 architect의 prompt로 **그대로** 전달한다(호환: 순차 진행 시 `investigation-ready --session <sid> --architect-prompt`의 성공과 `ready:true` 확인 뒤 같은 위임문). [JSON 출력 계약](references/architect-handoff.md) 경로도 그 문자열 안에 있다. 메인이 구현 대안·의사코드·버그 설명·요구사항 재해석·새 설명을 추가하거나 위임문을 재작성하지 않는다. 메인은 응답을 원문 그대로 저장하며 인계 오류를 근거 삭제·의미 재작성으로 복구하지 않고 중단·보고한다. prepare 성공 후 초안 변경은 runner가 동결 전에 거부한다.
 
-P1-b file 근거는 고정 위임문이 안내하는 읽기 전용 `evidence inspect`로 실제 줄 범위·ref·hash를 산출한다. 메인은 architect 최종 응답 본문 text block **전체**를 한 번 저장하며 JSON 부분 추출·앞뒤 설명 제거·재직렬화를 하지 않는다. 별도 transport metadata는 섞지 않고 **끝 개행·닫는 펜스 등 문자도 추가하지 않는다.** 잘못된 응답의 열린 펜스를 닫아 주지 않는다. 설명은 처음부터 JSON 내부 기존 필드에 작성한다. 잘못된 범위·JSON 앞뒤 설명은 원본을 보존하고 중단·보고한다([본문 구분·순수 JSON 예제·상세 계약](references/architect-handoff.md)).
+P1-b file 근거는 고정 위임문이 안내하는 읽기 전용 `evidence inspect`로 실제 줄 범위·ref·hash를 산출한다. 메인은 Codex 제안이 끝난 뒤 `proposal capture`로 architect 최종 응답 본문 text block **전체**를 한 번 저장하며 JSON 부분 추출·앞뒤 설명 제거·재직렬화를 하지 않는다. 별도 transport metadata는 섞지 않고 **끝 개행·닫는 펜스 등 문자도 추가하지 않는다.** 잘못된 응답의 열린 펜스를 닫아 주지 않는다. 설명은 처음부터 JSON 내부 기존 필드에 작성한다. 잘못된 범위·JSON 앞뒤 설명은 원본을 보존하고 중단·보고한다([본문 구분·순수 JSON 예제·상세 계약](references/architect-handoff.md)).
 
 이번 실행 중 조사 순서 위반을 발견하면 중단·보고한다. 새 파일·새 자식으로 위반을 감추지 않는다. 이 절차는 기존 훅을 유지하며 Read/Bash를 도구 수준에서 차단하지는 않는다.
 
@@ -34,7 +34,7 @@ Claude Code가 근거 준비·비교·보고를 맡고 Codex CLI가 설계·검�
 
 선택한 모드의 참조만 읽는다. 옵션은 함께 사용하지 않는다. 여러 종류를 요청하면 자동으로 호출을 늘리지 말고 우선 검토할 범위를 정한다. 자연어 요청은 "검토만"·"확인만"이면 `--review`, 테스트 시나리오나 구현 리뷰를 명시하면 해당 모드, 그 외에는 debate로 처리한다.
 
-**진입 직후 조사 순서:** 먼저 모드를 구분한다. 옵션 없음·`--frozen-critique`는 아래 단방향 공통 절차를 적용하지 않고 [debate P0 → P1-a → P1-b](references/debate.md)를 따른다. P0 준비는 사용자 제공 사실·규칙·이미 알려진 경로와 메타데이터만으로 중립 입력을 만드는 일이다. 필수 AGENTS·스킬·스키마 읽기와 경로 존재·브랜치/커밋·변경 파일명/상태 확인은 허용하지만, Codex 최초 proposal 종료 후 `investigation-ready`가 `ready:true`를 반환하기 전에는 대상 코드·테스트·관련 diff/로그·구현 문서 본문 조사, 외부 조사, Claude 초안 작성, 조사 에이전트 시작을 금지한다. 범위 확정에 내용 조사가 필요한 모호함은 먼저 사용자에게 질문한다. 기존 컨텍스트에 관련 조사·결론이 있으면 그 이력을 숨기지 않고, P1-b의 새 architect에 중립 입력만 전달해 격리한다. 과거의 무오염을 주장하거나 파일을 새로 만들어 순서 위반을 감추지 않는다. 이 절차와 완료 검사는 Claude의 Read/Bash를 도구 수준에서 차단하지는 못한다. `--review`·`--test-plan`·`--code-review`는 기존대로 다음 공통 절차에서 근거를 먼저 조사한다.
+**진입 직후 조사 순서:** 먼저 모드를 구분한다. 옵션 없음·`--frozen-critique`는 아래 단방향 공통 절차를 적용하지 않고 [debate P0 → P1-a → P1-b](references/debate.md)를 따른다. P0 준비는 사용자 제공 사실·규칙·이미 알려진 경로와 메타데이터만으로 중립 입력을 만드는 일이다. 필수 AGENTS·스킬·스키마 읽기와 경로 존재·브랜치/커밋·변경 파일명/상태 확인은 허용하지만, 메인은 P2 공개 전까지 대상 코드·테스트·관련 diff/로그·구현 문서 본문 조사, 외부 조사, Claude 초안 작성을 하지 않는다. 조사 에이전트는 `architect-prompt` 위임문을 받은 새 architect 1개만 Codex 최초 proposal과 동시에 시작한다. 범위 확정에 내용 조사가 필요한 모호함은 먼저 사용자에게 질문한다. 기존 컨텍스트에 관련 조사·결론이 있으면 그 이력을 숨기지 않고, P1-b의 새 architect에 중립 입력만 전달해 격리한다. 과거의 무오염을 주장하거나 파일을 새로 만들어 순서 위반을 감추지 않는다. 이 절차와 완료 검사는 Claude의 Read/Bash를 도구 수준에서 차단하지는 못한다. `--review`·`--test-plan`·`--code-review`는 기존대로 다음 공통 절차에서 근거를 먼저 조사한다.
 
 **사용자 확인 단계(모든 모드):** ① Codex 호출 전, packet/범위 명세를 확정하기 전에 범위·가정·우려·연계 확인이 필요한 점을 사용자에게 먼저 질문하고 답을 반영한다. ② 결과 보고 후, Codex 지적에서 새 우려·범위 밖 제안·판단이 갈리는 항목이 나오면 반영·구현하기 전에 사용자에게 질문한다. 질문 대상이 없으면 없다고 밝히고 진행한다.
 

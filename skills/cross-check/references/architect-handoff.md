@@ -1,6 +1,6 @@
 # P1-b architect 출력 계약
 
-P1-b 위임은 `investigation-ready --architect-prompt`가 반환한 **고정 architect_prompt 그대로** 전달한다. 그 문자열에 중립 입력 경로·이 출력 계약·순수 JSON 예제·`scripts/debate/schemas/proposal.schema.json` 경로가 들어 있다. 메인은 후보 구현·대안 예시·의사코드·버그 해석·추가 요구사항을 덧붙이지 않는다. 이는 조사 결론이 아닌 공통 프로토콜이다. 이 모드에서는 architect의 일반 Markdown 계획서 형식 대신 계약의 JSON object **하나만** 메시지로 반환한다(코드 펜스·앞뒤 설명 없음). 코드·호출부·계약·대안·조건·근거 원문·미확인을 조사하는 기존 기준은 그대로다. 형식에 맞추려고 설명을 줄이지 않는다.
+P1-b 위임은 입력 동결 직후 `architect-prompt`(호환: Codex 종료 후 `investigation-ready --architect-prompt`)가 반환한 **고정 architect_prompt 그대로** 전달하며, architect는 Codex 최초 제안과 동시에 조사한다. 그 문자열에 중립 입력 경로·이 출력 계약·순수 JSON 예제·`scripts/debate/schemas/proposal.schema.json` 경로가 들어 있다. 메인은 후보 구현·대안 예시·의사코드·버그 해석·추가 요구사항을 덧붙이지 않는다. 이는 조사 결론이 아닌 공통 프로토콜이다. 이 모드에서는 architect의 일반 Markdown 계획서 형식 대신 계약의 JSON object **하나만** 메시지로 반환한다(코드 펜스·앞뒤 설명 없음). 코드·호출부·계약·대안·조건·근거 원문·미확인을 조사하는 기존 기준은 그대로다. 형식에 맞추려고 설명을 줄이지 않는다.
 
 - 새 인계 형식은 최상위 `handoff_version: 2`가 필수다. 연결된 예제의 필드는 모두 필수다. 실제 스키마가 타입·enum의 기준이며, `design.components`, `flows`, `contracts`는 각각 **문자열 배열**이다. 객체를 넣지 말고 이름·위치·동작·조건을 처음부터 충분한 문자열로 작성한다. 문자열의 길이를 줄이라는 뜻이 아니다.
 - `requirement_mapping`, `alternatives`, `validation`, `risks`, `evidence`는 예제와 같은 object 배열이다. 빈 내용은 스키마가 허용하는 빈 배열로 표현하며 근거 없는 내용을 채우지 않는다. `status`는 `COMPLETE|INCOMPLETE`, `evidence_sufficiency`는 `sufficient|partial|insufficient`, `layer`는 `local|mock|user-real`, `severity`는 `high|medium|low`다.
@@ -26,7 +26,7 @@ P1-b 위임은 `investigation-ready --architect-prompt`가 반환한 **고정 ar
 
 메인은 architect **최종 응답 텍스트 전체를 그대로 한 번 저장**한다. 실제 응답 앞뒤 설명·코드 펜스·공백도 포함하며 JSON 부분만 추출하거나 다시 직렬화하지 않는다. 도구의 transport metadata는 응답 본문이 아니므로 포함하지 않는다. 이후 원본 파일은 편집·삭제하지 않는다. strict JSON parser는 앞뒤 설명·펜스가 있으면 등록 전에 거부한다. 메인은 원문과 오류를 보존하고 중단·보고하며, 설명을 버리거나 JSON 내부로 옮기거나 새 architect를 자동 호출하지 않는다. JSON만 생성하도록 도구 수준에서 강제하거나 최초 저장이 실제 응답과 같은지 자동 인증하는 기능은 아니다. `proposal prepare`가 허용하는 변환은 선언된 file evidence ID의 기계 연결뿐이다. runner가 만드는 prepared JSON의 들여쓰기·key 순서는 달라도 되지만 값·항목·배열 순서·문자열 내부의 공백·개행·근거·조건·위험·대안·미확인은 바꾸지 않는다.
 
-저장할 때는 Agent 결과에서 **실제 응답 본문 text block**을 복사한다. 본문과 별도 block으로 전달된 `agentId`·`usage` 같은 transport metadata는 섞지 않는다. 초기 user prompt를 최종 응답으로 착각하거나, 본문 안에서 metadata처럼 보이는 문자열을 지우지 않는다. 본문 구분이 불명확하면 임의로 합치거나 잘라내지 말고 판단 전 사용자 확인 규칙을 따른다.
+저장은 Codex 제안이 끝난 뒤 `proposal capture --agent-output <Agent 결과의 output_file>`로 한다. capture는 그 transcript의 마지막 `SubagentHandback` 메시지(없으면 마지막 텍스트)를 문자 추가 없이 새 파일에 쓰고 등록·동결은 하지 않는다. capture가 메시지를 찾지 못해 거부하면 아래 규칙대로 직접 저장한다. 직접 저장할 때는 Agent 결과에서 **실제 응답 본문 text block**을 복사한다. 본문과 별도 block으로 전달된 `agentId`·`usage` 같은 transport metadata는 섞지 않는다. 초기 user prompt를 최종 응답으로 착각하거나, 본문 안에서 metadata처럼 보이는 문자열을 지우지 않는다. 본문 구분이 불명확하면 임의로 합치거나 잘라내지 말고 판단 전 사용자 확인 규칙을 따른다.
 
 **문자 추가도 금지한다.** 끝 개행(LF/CRLF)·닫는 코드펜스·따옴표·괄호를 붙이지 않고 들여쓰기·줄바꿈도 정규화하지 않는다. JSON 뒤에 개행이 없는 응답은 그대로 개행 없이 저장한다. 설명·열린 코드펜스·JSON으로 끝나 닫는 펜스가 없는 잘못된 응답도 **펜스를 닫아 주지 않고 있는 그대로** 저장한다. 이는 Markdown 문서 편집이 아니다. 오류는 원본 보존 후 prepare의 strict 검증으로 보고하며, 원문을 고쳐 다시 제출하지 않는다. 원문 문자열 내부의 코드펜스·공백·Unicode도 그대로 유지한다.
 
