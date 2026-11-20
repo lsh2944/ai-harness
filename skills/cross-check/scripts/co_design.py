@@ -3019,6 +3019,8 @@ def cmd_evidence_add(args):
 def cmd_proposal(args):
     sid = sid_check(args.session)
     with locked_session(sid) as session:
+        if args.action == 'capture':
+            return HANDOFF.capture(SimpleNamespace(**globals()), session, args.agent_output, args.out), 0
         return HANDOFF.prepare(SimpleNamespace(**globals()), session, args.file, args.out), 0
 
 
@@ -4606,7 +4608,12 @@ def parser():
     p.add_argument('--normalize-refs', action='store_true', help='normalize designated input references after source and birthtime checks; preserve original audit')
     p.add_argument('--file', required=True)
     p = sub.add_parser('proposal')
-    prepare = p.add_subparsers(dest='action', required=True).add_parser('prepare')
+    actions = p.add_subparsers(dest='action', required=True)
+    capture = actions.add_parser('capture', help='save the architect final message verbatim from the Agent output_file (no registration)')
+    capture.add_argument('--session', required=True)
+    capture.add_argument('--agent-output', required=True, help='absolute output_file returned by the Agent tool')
+    capture.add_argument('--out', required=True, help='new separate message file inside the current project')
+    prepare = actions.add_parser('prepare')
     prepare.add_argument('--session', required=True)
     prepare.add_argument('--file', required=True, help='structured architect message saved once by main inside the current project')
     prepare.add_argument('--out', required=True, help='new separate proposal draft inside the current project')

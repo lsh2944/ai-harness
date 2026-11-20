@@ -1,11 +1,101 @@
 """読み取り専用 architect の JSON メッセージを、再作文せず登録済み提案へ変換する。"""
 import copy
+import json
+import os
 from pathlib import Path
 import re
 import shlex
 
 
 LOCAL = re.compile(r'local:[A-Za-z][A-Za-z0-9_-]{0,63}')
+# Agent 結果の output_file は tasks/<id>.output から subagents/agent-<id>.jsonl への symlink（2026-11-20 実測）。
+AGENT_TRANSCRIPT = re.compile(r'agent-[A-Za-z0-9_-]{1,128}\.jsonl')
+AGENT_OUTPUT_MAX = 32 * 1024 * 1024
+
+
+def agent_message(co, agent_output):
+    """architect の transcript から最終報告を原文のまま取り出す（SubagentHandback 優先、なければ最後の text）。
+
+    形式は公開仕様ではないので、見つからなければ推測せず拒否する（主側の手動保存は従来どおり使える）。
+    """
+    given = Path(agent_output)
+    if not given.is_absolute():
+        raise co.Refused('--agent-output must be the absolute output_file path returned by the Agent tool')
+    resolved = given.resolve(strict=True)
+    if resolved.parent.name != 'subagents' or not AGENT_TRANSCRIPT.fullmatch(resolved.name):
+        raise co.Refused('agent output must resolve to a subagents/agent-*.jsonl transcript')
+    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not co.stat.S_ISREG(info.st_mode):
+            raise co.Refused('agent output transcript must be a regular file')
+        if info.st_size > AGENT_OUTPUT_MAX:
+            raise co.Refused('agent output transcript is larger than 32 MiB; save the response manually and report')
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    handback = text = None
+    for line in b''.join(chunks).splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get('type') != 'assistant':
+            continue
+        content = (entry.get('message') or {}).get('content') if isinstance(entry.get('message'), dict) else None
+        for item in content if isinstance(content, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') == 'tool_use' and item.get('name') == 'SubagentHandback':
+                value = (item.get('input') or {}).get('message') if isinstance(item.get('input'), dict) else None
+                if isinstance(value, str) and value.strip():
+                    handback = value
+            elif item.get('type') == 'text' and isinstance(item.get('text'), str) and item['text'].strip():
+                text = item['text']
+    if handback is not None:
+        return handback, 'SubagentHandback'
+    if text is not None:
+        return text, 'text'
+    raise co.Refused('no final architect message found in the agent output; do not guess, save the response manually and report')
+
+
+def capture(co, session, agent_output, output):
+    """architect の最終報告を、文字を足さず新しい別ファイルに 1 回だけ保存する。登録・凍結はしない。"""
+    sid = session['sid']
+    co.require_state(session, 'CODEX_PROPOSED')
+    if session.get('proposal_handoff') is not None:
+        raise co.Refused('architect handoff already prepared; do not capture again')
+    call = co.phase_call(session, 'proposal')
+    if not call or not call.get('ended_at') or call.get('execution') != 'ok':
+        raise co.Refused('capture requires a successfully completed Codex proposal; wait for it before saving the architect response')
+    message, source = agent_message(co, agent_output)
+    data = message.encode('utf-8')
+    if len(data) > co.MAX_DOC * 4:
+        raise co.Refused('architect message exceeds the handoff size limit; preserve it and report')
+    target = co.submission_draft_target(output)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        raise co.Refused('capture output already exists; captures never overwrite files') from None
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError('short write')
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return {'status': 'ok', 'path': str(target), 'bytes': len(data), 'sha256': co.sha256(data), 'source': source,
+            'head': message[:20], 'tail': message[-20:],
+            'next': f'python3 {co.HERE / "co_design.py"} proposal prepare --session {sid} --file {target} '
+                    '--out <new separate proposal draft path>'}
 
 
 def exact(co, value, names):

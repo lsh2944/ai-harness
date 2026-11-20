@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from test_partial_submission import SubmissionBase, co
 
@@ -593,6 +594,104 @@ class ProposalHandoffTests(SubmissionBase):
         self.assertEqual((output['state'], code), ('STOPPED', 2))
         self.prepare(sid, self.message(), False)
         self.assertEqual(self.env.calls(), ['proposal'])
+
+
+class ArchitectCaptureTests(SubmissionBase):
+    """Agent の output_file（transcript への symlink）から最終報告を原文のまま保存する。"""
+
+    def transcript(self, entries, name='agent-a1b2c3.jsonl'):
+        # 実測の配置を模す: tasks/<id>.output -> subagents/agent-<id>.jsonl
+        target = self.env.root / 'transcripts' / 'subagents' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(''.join(json.dumps(e, ensure_ascii=False) + '\n' for e in entries), encoding='utf-8')
+        link = self.env.root / 'tasks' / (name + '.output')
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(target)
+        return link
+
+    @staticmethod
+    def assistant(*content):
+        return {'type': 'assistant', 'message': {'role': 'assistant', 'content': list(content)}}
+
+    def proposed(self):
+        sid = self.env.to_inputs_frozen()
+        self.env.ok('call', '--session', sid, '--phase', 'proposal')
+        return sid
+
+    def capture(self, sid, link, expected=True):
+        out = self.location('architect-message.json')
+        before = self.snapshot()
+        result, code = self.env.run('proposal', 'capture', '--session', sid, '--agent-output', link, '--out', out)
+        self.assertEqual(code, 0 if expected else 2, result)
+        if not expected:
+            self.assertFalse(out.exists())
+            self.assertEqual(self.snapshot(), before)
+        return result, out
+
+    def test_handback_is_saved_verbatim_and_prepares_and_freezes(self):
+        sid = self.proposed()
+        message = ProposalHandoffTests.message(self)
+        message['handoff_version'] = 2
+        message['proposal']['evidence'] = [e for e in message['proposal']['evidence'] if e['kind'] == 'brief']
+        message['evidence_manifest'] = []
+        body = ' ' + json.dumps(message, ensure_ascii=False, indent=2).replace('\n', '\r\n')  # 文字を足さず保存されること
+        link = self.transcript([
+            self.assistant({'type': 'text', 'text': '調査中のメモ'}),
+            self.assistant({'type': 'text', 'text': '最終報告を渡します'},
+                           {'type': 'tool_use', 'id': 't1', 'name': 'SubagentHandback', 'input': {'message': body}}),
+        ])
+        result, out = self.capture(sid, link)
+        self.assertEqual(out.read_bytes(), body.encode('utf-8'))
+        self.assertEqual((result['source'], result['bytes'], result['sha256']),
+                         ('SubagentHandback', len(body.encode('utf-8')), co.sha256(body.encode('utf-8'))))
+        prepared, code = self.env.run('proposal', 'prepare', '--session', sid, '--file', out,
+                                      '--out', self.location('proposal.json'))
+        self.assertEqual(code, 0, prepared)
+        self.env.ok('freeze', '--session', sid, '--side', 'claude', '--file', prepared['path'])
+        self.assertEqual(co.read_json_artifact(sid, 'claude/proposal.json'), message['proposal'])
+
+    def test_last_text_is_used_only_without_handback(self):
+        sid = self.proposed()
+        link = self.transcript([self.assistant({'type': 'text', 'text': 'first'}),
+                                {'type': 'user', 'message': {'content': [{'type': 'text', 'text': 'ignored user text'}]}},
+                                self.assistant({'type': 'text', 'text': '{"final": true}'})])
+        result, out = self.capture(sid, link)
+        self.assertEqual((result['source'], out.read_text()), ('text', '{"final": true}'))
+
+    def test_refusals_leave_no_file_and_no_session_change(self):
+        sid = self.proposed()
+        good = [self.assistant({'type': 'tool_use', 'name': 'SubagentHandback', 'input': {'message': '{}'}})]
+        cases = {
+            'no message': self.transcript([self.assistant({'type': 'tool_use', 'name': 'Read', 'input': {}})], 'agent-none.jsonl'),
+            'wrong name': self.transcript(good, 'notes.jsonl'),
+        }
+        outside = self.env.root / 'transcripts' / 'other' / 'agent-x.jsonl'
+        outside.parent.mkdir(parents=True)
+        outside.write_text(json.dumps(good[0]) + '\n')
+        cases['not in subagents'] = outside
+        for label, path in cases.items():
+            with self.subTest(label=label):
+                self.capture(sid, path, expected=False)
+        with self.subTest(label='relative path'):
+            result, code = self.env.run('proposal', 'capture', '--session', sid, '--agent-output', 'tasks/x.output',
+                                        '--out', self.location('m.json'))
+            self.assertEqual(code, 2, result)
+        with self.subTest(label='oversized'):
+            link = self.transcript(good, 'agent-big.jsonl')
+            with patch.object(co.HANDOFF, 'AGENT_OUTPUT_MAX', 10):
+                self.capture(sid, link, expected=False)
+        with self.subTest(label='existing output'):
+            link = self.transcript(good, 'agent-exists.jsonl')
+            out = self.location('exists.json')
+            out.write_text('keep')
+            result, code = self.env.run('proposal', 'capture', '--session', sid, '--agent-output', link, '--out', out)
+            self.assertEqual((code, out.read_text()), (2, 'keep'), result)
+        self.assertNotIn('proposal_handoff', self.env.session(sid))
+
+    def test_capture_waits_for_completed_codex_proposal(self):
+        sid = self.env.to_inputs_frozen()
+        link = self.transcript([self.assistant({'type': 'tool_use', 'name': 'SubagentHandback', 'input': {'message': '{}'}})])
+        self.capture(sid, link, expected=False)
 
 
 if __name__ == '__main__':
