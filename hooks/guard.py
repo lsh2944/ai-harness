@@ -5,6 +5,7 @@ Claude 経由の操作だけを制限する（ユーザー自身のターミナ�
   1. ファイル削除 → ユーザー承認（一時領域・検証済み Python キャッシュは除外）
   2. AWS → 設定した read-only プロファイル以外の認証情報を禁止（aws.enabled=false ならプロファイル固定のみ無効）
   3. AWS → 参照系以外の操作（作成・変更・削除・publish・deploy）を禁止（aws.enabled に関係なく常に有効）
+     例外: bedrock-runtime の推論呼び出し 4 種（BEDROCK_INFER_OPS）のみ許可
   4. ガード設定・認証情報ファイル自体の改変 → ユーザー承認、認証情報の読み取り → 禁止
 
 設定は同じディレクトリの harness_config.json（install.py が生成）から読む。
@@ -210,6 +211,9 @@ READ_OP_DENY = {"get-login-password", "get-authorization-token", "get-secret-val
                "get-role-credentials", "get-credentials", "get-password-data"}
 S3_READ = {"ls", "presign"}
 LOGS_READ = {"start-query", "stop-query"}
+# Bedrock のモデル推論呼び出しだけを例外として許可する（2026-11-20 ユーザー決定）。
+# 非同期呼び出し（S3 へ結果を書く）・ガードレール・管理系（bedrock サービス）・エージェントは対象外。
+BEDROCK_INFER_OPS = {"converse", "converse-stream", "invoke-model", "invoke-model-with-response-stream"}
 AWS_GLOBAL_FLAGS = {"--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request",
                     "--no-cli-pager", "--no-cli-auto-prompt", "--cli-auto-prompt"}
 
@@ -712,6 +716,13 @@ def check_aws_argv(argv, assigns, source):
     if svc == "logs" and op in LOGS_READ:
         return None
     if svc == "sts" and op == "get-caller-identity":
+        return None
+    if svc == "bedrock-runtime" and op in BEDROCK_INFER_OPS:
+        # invoke-model 系の位置引数は出力ファイル。保護パスへの書き込みは通常の判定に従う
+        for outfile in pos[2:]:
+            protected = check_edit(outfile)
+            if protected:
+                return protected
         return None
     if op in READ_OP_DENY:
         return ("deny", f"[{source}] aws {svc} {op} は認証情報を出力するため禁止")

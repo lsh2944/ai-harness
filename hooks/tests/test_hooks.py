@@ -62,6 +62,20 @@ class GuardTests(unittest.TestCase):
             ('cd ~/.aws && cat credentials', 'deny'),
             ('aws ec2 describe-instances --profile default', 'deny'),
             ('aws s3 sync s3://fake /tmp/fake --delete', 'ask'),
+            # Bedrock は推論呼び出し 4 種だけ許可（出力ファイルは保護パス判定、プロファイル固定は維持）
+            ('aws bedrock-runtime converse --model-id fake --messages fake', None),
+            ('aws bedrock-runtime converse-stream --model-id fake --messages fake', None),
+            ('aws bedrock-runtime invoke-model --model-id fake --body fake /tmp/fake-out.json', None),
+            ('aws bedrock-runtime invoke-model-with-response-stream --model-id fake --body fake /tmp/fake-out.json', None),
+            ('aws bedrock-runtime invoke-model --model-id fake --body fake ~/.aws/credentials', 'deny'),
+            ('aws bedrock-runtime invoke-model --model-id fake --body fake ~/.claude/settings.json', 'ask'),
+            ('aws bedrock-runtime converse --model-id fake --messages fake --profile default', 'deny'),
+            ('AWS_PROFILE=default aws bedrock-runtime converse --model-id fake --messages fake', 'deny'),
+            ('aws bedrock-runtime start-async-invoke --model-id fake', 'deny'),
+            ('aws bedrock-runtime apply-guardrail --guardrail-identifier fake', 'deny'),
+            ('aws bedrock create-provisioned-model-throughput --model-id fake', 'deny'),
+            ('aws bedrock-agent-runtime invoke-agent --agent-id fake', 'deny'),
+            ('aws bedrock list-foundation-models', None),
             ('rm /tmp/harness-test-placeholder', None),
             ('rm -f /tmp/t_*.ts /private/tmp/claude-502/x/a.txt', None),
             ('rm /tmp/*/fake', 'ask'),
@@ -267,7 +281,9 @@ class GuardTests(unittest.TestCase):
                                           ('aws s3api delete-bucket --bucket fake', 'deny'),
                                           ('echo not-aws', 'deny'),
                                           ('aws sts get-caller-identity', None),
-                                          ('aws ec2 describe-instances --profile <PROFILE>', None)]:
+                                          ('aws ec2 describe-instances --profile <PROFILE>', None),
+                                          ('aws bedrock-runtime converse --model-id fake --messages fake', None),
+                                          ('aws bedrock-runtime start-async-invoke --model-id fake', 'deny')]:
                     with self.subTest(runtime=runtime, name=name, command=command):
                         result = run_guard(json.dumps({'tool_name':name,'tool_input':{'cli_command':command}}), runtime)
                         decision = json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
