@@ -1950,6 +1950,26 @@ class FormatAssistanceTests(DebatedMixin, Base):
         self.assertEqual(doc['decisions'][0]['adopted_from'], '')
         self.assertEqual(doc['metrics']['missing_required'], -1)
 
+    def test_scaffold_hints_show_item_shapes_for_empty_object_arrays(self):
+        # 空配列で渡す user_decisions・unresolved の要素形を示し、文字列で埋めて INVALID になる繰り返しを防ぐ。
+        sid = self.debated()
+        self.env.write_artifact(sid, 'ledger.json', fx.final_ledger())
+        output = self.env.ok('synthesis', 'scaffold', '--session', sid)
+        shapes = output['hints']['item_shapes']
+        self.assertEqual(shapes['user_decisions[]']['required'], ['issue_id', 'question', 'options'])
+        self.assertEqual(shapes['user_decisions[]']['fields']['options'], ['string'])
+        self.assertEqual(shapes['unresolved[]']['fields']['blocking'], 'boolean')
+        # 文字列配列（required 等）と既に要素のある decisions は示さない。
+        self.assertNotIn('required[]', shapes)
+        self.assertNotIn('decisions[]', shapes)
+        # 示した形どおりに埋めれば形式検査を通る。
+        doc = json.loads(Path(output['draft']).read_text())
+        doc['user_decisions'] = [{'issue_id': 'I1', 'question': 'q', 'options': ['a', 'b']}]
+        doc['unresolved'] = [{'issue_id': 'C1', 'impact': 'i', 'needed_evidence': 'e', 'blocking': False}]
+        for decision in doc['decisions']:
+            decision['adopted_from'] = 'claude'
+        co.validate_doc(doc, 'synthesis')
+
 
 class BatchReuseTests(Base):
     def setUp(self):

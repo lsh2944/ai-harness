@@ -3283,6 +3283,32 @@ def scaffold_hints(session, kind, document):
             walk(node['items'], path + '[]')
     walk(schema)
     issues = document.get('issues') or (_artifact_or_none(session['sid'], 'ledger.json') or {}).get('issues', [])
+
+    def type_text(node):
+        if not isinstance(node, dict):
+            return 'any'
+        if 'enum' in node:
+            return 'one of: ' + ' | '.join(str(v) for v in node['enum'])
+        if node.get('type') == 'array':
+            return [type_text(node.get('items'))]
+        return node.get('type', 'any')
+
+    # 草稿で空配列のまま渡す欄のうち、要素がオブジェクトのものは形が見えないので、スキーマから要素の形を示す。
+    shapes = {}
+
+    def shape_walk(node, value, path=''):
+        if not isinstance(node, dict) or not isinstance(value, dict):
+            return
+        for key, child in node.get('properties', {}).items():
+            here = path + '.' + key if path else key
+            if isinstance(value.get(key), list) and not value[key]:
+                items = child.get('items') if isinstance(child, dict) else None
+                if isinstance(items, dict) and items.get('type') == 'object' and items.get('properties'):
+                    shapes[here + '[]'] = {'required': list(items.get('required', [])),
+                                           'fields': {k: type_text(v) for k, v in items['properties'].items()}}
+            elif isinstance(value.get(key), dict):
+                shape_walk(child, value[key], here)
+    shape_walk(schema, document)
     counts = {name: len(input_text(session['sid'], name).splitlines()) for name in INPUT_FILES}
     known = known_evidence(session)
     proposal = _artifact_or_none(session['sid'], 'claude/proposal.json') or {}
@@ -3298,6 +3324,7 @@ def scaffold_hints(session, kind, document):
             'evidence_ref_rule': 'Ledger refs accept only known_evidence_ids or valid frozen input line references. A proposal brief/inference E ID is not a registered ledger ref. Keep the original proposal/evidence unchanged; do not promote inference, delete evidence, or guess an ID replacement.',
             'reference_examples': [f'{name}:L1' for name, count in counts.items() if count],
             'enum_choices': enums,
+            'item_shapes': shapes,
             'semantic_fields': 'Choose stance, importance, agreement, verification, metrics and adoption from evidence; no automatic inference.'}
 
 
