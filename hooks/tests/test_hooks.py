@@ -18,7 +18,8 @@ P = env.PROJECT
 
 def fill(text):
     """テストケースの置換記号を隔離環境の値に置き換える。"""
-    return text.replace('<PROJECT>', env.PROJECT).replace('<HOME>', str(env.HOME)).replace('<PROFILE>', env.PROFILE)
+    return (text.replace('<PROJECT>', env.PROJECT).replace('<HOME>', str(env.HOME)).replace('<PROFILE>', env.PROFILE)
+            .replace('<HARNESS>', env.HARNESS_HOME))
 
 
 def run_guard(payload, runtime='claude', guard=None, environ=None):
@@ -62,13 +63,47 @@ class GuardTests(unittest.TestCase):
             ('cd ~/.aws && cat credentials', 'deny'),
             ('aws ec2 describe-instances --profile default', 'deny'),
             ('aws s3 sync s3://fake /tmp/fake --delete', 'ask'),
-            # Bedrock は推論呼び出し 4 種だけ許可（出力ファイルは保護パス判定、プロファイル固定は維持）
-            ('aws bedrock-runtime converse --model-id fake --messages fake', None),
-            ('aws bedrock-runtime converse-stream --model-id fake --messages fake', None),
-            ('aws bedrock-runtime invoke-model --model-id fake --body fake /tmp/fake-out.json', None),
-            ('aws bedrock-runtime invoke-model-with-response-stream --model-id fake --body fake /tmp/fake-out.json', None),
-            ('aws bedrock-runtime invoke-model --model-id fake --body fake ~/.aws/credentials', 'deny'),
-            ('aws bedrock-runtime invoke-model --model-id fake --body fake ~/.claude/settings.json', 'ask'),
+            # Bedrock 推論 4 種は bedrock_run.py（API キーのラッパー）経由だけ許可。直接呼び出しは拒否
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake --messages fake', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse-stream --model-id fake --messages fake', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime invoke-model --model-id fake --body fake /tmp/fake-out.json', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime invoke-model-with-response-stream --model-id fake --body fake /tmp/fake-out.json', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime invoke-model --model-id fake --body fake ~/.claude/settings.json', 'ask'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py 3', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py uv run --with boto3 python /tmp/fake-bench.py 3', None),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime start-async-invoke --model-id fake', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws s3 ls', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake --profile <PROFILE>', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py python3 -c "print(1)"', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py uv run python -m http.server', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py printenv', 'deny'),
+            ("python3 <HARNESS>/tools/aws/bedrock_run.py sh -c 'env'", 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py', 'deny'),
+            ('python3 /tmp/bedrock_run.py aws bedrock-runtime converse --model-id fake --messages fake', 'deny'),
+            # 正規形以外の実行（インタプリタオプション・uv 経由）は拒否、env 経由の正規形は許可
+            ('python3 -u <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('uv run python <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('/usr/bin/env python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', None),
+            ('cd <HARNESS>/tools/aws && python3 bedrock_run.py python3 /tmp/fake-bench.py', None),
+            # キー漏えい経路: --debug（認証ヘッダーをログ出力）・別エンドポイント・プロキシ・PATH・偽の実行ファイル
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake --debug', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake --endpoint-url http://127.0.0.1:9', 'deny'),
+            ('HTTPS_PROXY=http://127.0.0.1:9 python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://127.0.0.1:9 python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('PATH=/tmp/x:/usr/bin python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py /tmp/x/aws bedrock-runtime converse --model-id fake', 'deny'),
+            ('AWS_PROFILE=other python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('export PATH=/tmp/x:/usr/bin; python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake', 'deny'),
+            ('UV_PYTHON=/tmp/x python3 <HARNESS>/tools/aws/bedrock_run.py uv run python /tmp/fake-bench.py', 'deny'),
+            ('export AWS_DATA_PATH=/tmp/x && python3 <HARNESS>/tools/aws/bedrock_run.py python3 /tmp/fake-bench.py', 'deny'),
+            ('python3 <HARNESS>/tools/aws/bedrock_run.py aws bedrock-runtime converse --model-id fake --system --debug', 'deny'),
+            ('echo $AWS_BEARER_TOKEN_BEDROCK', 'deny'),
+            ('AWS_BEARER_TOKEN_BEDROCK=fake aws bedrock-runtime converse --model-id fake', 'deny'),
+            ('printenv AWS_BEARER_TOKEN_BEDROCK', 'deny'),
+            ('cat ~/.aws/bedrock_api_key', 'deny'),
+            ('aws bedrock-runtime converse --model-id fake --messages fake', 'deny'),
+            ('aws bedrock-runtime converse-stream --model-id fake --messages fake', 'deny'),
+            ('aws bedrock-runtime invoke-model --model-id fake --body fake /tmp/fake-out.json', 'deny'),
             ('aws bedrock-runtime converse --model-id fake --messages fake --profile default', 'deny'),
             ('AWS_PROFILE=default aws bedrock-runtime converse --model-id fake --messages fake', 'deny'),
             ('aws bedrock-runtime start-async-invoke --model-id fake', 'deny'),
@@ -273,6 +308,29 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.invoke(data, 'codex'), 'deny')
         self.assertEqual(self.invoke(data), 'ask')
 
+    def test_bedrock_wrapper_and_guard_agree(self):
+        # ラッパー（tools/aws/bedrock_run.py）の validate と同じ表で、ガードの判定が一致することを確かめる
+        path = Path(__file__).resolve().parents[2] / 'tools/aws/test_bedrock_run.py'
+        spec = importlib.util.spec_from_file_location('test_bedrock_run_cases', path)
+        cases = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cases)
+        wrapper = env.HARNESS_HOME + '/tools/aws/bedrock_run.py'
+        for cmd in cases.ALLOWED:
+            with self.subTest(allowed=cmd):
+                self.assertIsNone(cases.br.validate(cmd))
+                self.assertIsNone(g.check_bedrock_run([wrapper] + cmd, P))
+        for cmd in cases.DENIED:
+            with self.subTest(denied=cmd):
+                self.assertIsNotNone(cases.br.validate(cmd))
+                result = g.check_bedrock_run([wrapper] + cmd, P)
+                self.assertEqual(result[0] if result else None, 'deny')
+        # 許可リストの定数も一致させる
+        self.assertEqual(cases.br.AWS_VALUE_OPTS, g.BEDROCK_AWS_VALUE_OPTS)
+        self.assertEqual(cases.br.AWS_FLAG_OPTS, g.BEDROCK_AWS_FLAG_OPTS)
+        self.assertEqual(cases.br.INFER_OPS, g.BEDROCK_INFER_OPS)
+        self.assertEqual(cases.br.PROGRAMS, g.BEDROCK_PROGRAMS)
+        self.assertEqual(cases.br.UV_VALUE_OPTS, g.UV_VALUE_OPTS)
+
     def test_aws_mcp_both_tool_names(self):
         # Codex は aws-api を aws_api に正規化して hook に渡す
         for runtime in ('claude', 'codex'):
@@ -282,7 +340,8 @@ class GuardTests(unittest.TestCase):
                                           ('echo not-aws', 'deny'),
                                           ('aws sts get-caller-identity', None),
                                           ('aws ec2 describe-instances --profile <PROFILE>', None),
-                                          ('aws bedrock-runtime converse --model-id fake --messages fake', None),
+                                          # MCP からの Bedrock 推論はラッパーを通らないため拒否
+                                          ('aws bedrock-runtime converse --model-id fake --messages fake', 'deny'),
                                           ('aws bedrock-runtime start-async-invoke --model-id fake', 'deny')]:
                     with self.subTest(runtime=runtime, name=name, command=command):
                         result = run_guard(json.dumps({'tool_name':name,'tool_input':{'cli_command':command}}), runtime)

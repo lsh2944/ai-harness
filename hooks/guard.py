@@ -5,7 +5,7 @@ Claude 経由の操作だけを制限する（ユーザー自身のターミナ�
   1. ファイル削除 → ユーザー承認（一時領域・検証済み Python キャッシュは除外）
   2. AWS → 設定した read-only プロファイル以外の認証情報を禁止（aws.enabled=false ならプロファイル固定のみ無効）
   3. AWS → 参照系以外の操作（作成・変更・削除・publish・deploy）を禁止（aws.enabled に関係なく常に有効）
-     例外: bedrock-runtime の推論呼び出し 4 種（BEDROCK_INFER_OPS）のみ許可
+     例外: bedrock-runtime の推論呼び出し 4 種（BEDROCK_INFER_OPS）は tools/aws/bedrock_run.py（Bedrock API キー）経由のみ許可
   4. ガード設定・認証情報ファイル自体の改変 → ユーザー承認、認証情報の読み取り → 禁止
 
 設定は同じディレクトリの harness_config.json（install.py が生成）から読む。
@@ -212,8 +212,33 @@ READ_OP_DENY = {"get-login-password", "get-authorization-token", "get-secret-val
 S3_READ = {"ls", "presign"}
 LOGS_READ = {"start-query", "stop-query"}
 # Bedrock のモデル推論呼び出しだけを例外として許可する（2026-11-20 ユーザー決定）。
+# 読み取り専用プロファイルには推論権限がないため、Bedrock API キーを渡すラッパー（tools/aws/bedrock_run.py）経由に限る。
 # 非同期呼び出し（S3 へ結果を書く）・ガードレール・管理系（bedrock サービス）・エージェントは対象外。
 BEDROCK_INFER_OPS = {"converse", "converse-stream", "invoke-model", "invoke-model-with-response-stream"}
+BEDROCK_RUN_NAME = "bedrock_run.py"
+BEDROCK_TOKEN_RE = re.compile(r"AWS_BEARER_TOKEN_BEDROCK")
+PYTHON_RE = re.compile(r"^python[0-9.]*$")
+# 以下はラッパー（tools/aws/bedrock_run.py）と同じ許可範囲。変更時は両方を揃える（動値テストで検証）
+BEDROCK_PROGRAMS = {"aws", "python", "python3", "uv"}
+BEDROCK_PYTHONS = {"python", "python3"}
+BEDROCK_AWS_VALUE_OPTS = {
+    "--model-id", "--messages", "--system", "--inference-config", "--tool-config", "--guardrail-config",
+    "--additional-model-request-fields", "--additional-model-response-field-paths", "--prompt-variables",
+    "--request-metadata", "--performance-config", "--service-tier",
+    "--body", "--content-type", "--accept", "--trace", "--guardrail-identifier", "--guardrail-version",
+    "--performance-config-latency",
+    "--region", "--output", "--query", "--cli-binary-format", "--cli-read-timeout", "--cli-connect-timeout",
+}
+BEDROCK_AWS_FLAG_OPTS = {"--no-cli-pager", "--no-paginate"}
+BEDROCK_OUTFILE_OPS = {"invoke-model", "invoke-model-with-response-stream"}
+UV_VALUE_OPTS = {"--with", "--with-requirements", "--project", "--directory", "--index-url"}
+UV_DENY_OPTS = {"--python", "-p"}
+# ラッパーと同じ命令内で宛先・実行ファイル探索を変える代入（キーの持ち出し・偽の実行ファイル）を拒否する
+BEDROCK_ENV_NAMES = (r"(AWS_ENDPOINT_URL\w*|\w*_PROXY|AWS_CA_BUNDLE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE"
+                     r"|SSL_CERT_FILE|SSL_CERT_DIR|AWS_CONFIG_FILE|AWS_DATA_PATH|UV_PYTHON|PATH)")
+BEDROCK_ENV_DENY_RE = re.compile(rf"^{BEDROCK_ENV_NAMES}$", re.I)
+# 前のセグメントの export 等も含め、ラッパーを含む命令内のこれらの代入を検出する（文字列判定の補助防御）
+BEDROCK_ENV_ASSIGN_RE = re.compile(rf"(?<![\w$]){BEDROCK_ENV_NAMES}\s*=", re.I)
 AWS_GLOBAL_FLAGS = {"--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request",
                     "--no-cli-pager", "--no-cli-auto-prompt", "--cli-auto-prompt"}
 
@@ -652,8 +677,9 @@ def find_python_cache(argv, cwd):
 
 
 # ---------------- AWS ----------------
-def check_aws_argv(argv, assigns, source):
-    """argv[0] == 'aws'。問題があれば (decision, reason) を返す"""
+def check_aws_argv(argv, assigns, source, bedrock_wrapped=False):
+    """argv[0] == 'aws'。問題があれば (decision, reason) を返す。
+    bedrock_wrapped は bedrock_run.py 経由の呼び出し（Bedrock 推論 4 種の例外を有効にする）。"""
     profile = None
     pos = []
     i = 1
@@ -718,6 +744,9 @@ def check_aws_argv(argv, assigns, source):
     if svc == "sts" and op == "get-caller-identity":
         return None
     if svc == "bedrock-runtime" and op in BEDROCK_INFER_OPS:
+        if not bedrock_wrapped:
+            return ("deny", f"[{source}] Bedrock 推論は Bedrock API キーのラッパー経由のみ許可"
+                            f"（python3 <ハーネス>/tools/aws/{BEDROCK_RUN_NAME} aws bedrock-runtime {op} ...）")
         # invoke-model 系の位置引数は出力ファイル。保護パスへの書き込みは通常の判定に従う
         for outfile in pos[2:]:
             protected = check_edit(outfile)
@@ -730,6 +759,94 @@ def check_aws_argv(argv, assigns, source):
         return None
     return ("deny", f"[{source}] aws {svc} {op} は参照系以外の操作のため禁止（Claude は read-only 運用）。"
                     "変更が必要ならコマンドを提示してユーザーに実行を依頼すること")
+
+
+def _bedrock_python_args(args):
+    """python に渡す引数: 先頭が .py スクリプトであること（-c・-m 等は不可）。"""
+    if not args or args[0].startswith("-") or not args[0].endswith(".py"):
+        return ("deny", f"{BEDROCK_RUN_NAME} 経由の python は .py スクリプトの直接実行のみ（-c・-m 等は不可）")
+    return None
+
+
+def _bedrock_aws_args(inner):
+    """aws bedrock-runtime の推論 4 種と許可リストのオプションだけを通す（--debug・--endpoint-url 等は拒否）。"""
+    if len(inner) < 3 or inner[1] != "bedrock-runtime" or inner[2] not in BEDROCK_INFER_OPS:
+        return ("deny", f"{BEDROCK_RUN_NAME} 経由の aws は bedrock-runtime の推論 4 種のみ")
+    positional = 0
+    i = 3
+    while i < len(inner):
+        token = inner[i]
+        if token.startswith("-"):
+            name = token.split("=", 1)[0]
+            if name in BEDROCK_AWS_FLAG_OPTS and "=" not in token:
+                i += 1
+                continue
+            if name not in BEDROCK_AWS_VALUE_OPTS:
+                return ("deny", f"{BEDROCK_RUN_NAME} 経由の aws でオプション {name} は許可されていない")
+            if "=" in token:
+                i += 1
+                continue
+            # aws CLI は位置に関係なく --debug 等を先に解釈するため、値の位置の '-' 始まり（負数以外）も拒否する
+            value = inner[i + 1] if i + 1 < len(inner) else None
+            if value is None or (value.startswith("-") and not re.fullmatch(r"-[0-9]+(\.[0-9]+)?", value)):
+                return ("deny", f"{BEDROCK_RUN_NAME} 経由の aws でオプション {name} の値がない（または - で始まる）")
+            i += 2
+            continue
+        positional += 1
+        if inner[2] not in BEDROCK_OUTFILE_OPS or positional > 1:
+            return ("deny", f"{BEDROCK_RUN_NAME} 経由の aws で位置引数 {token} は許可されていない")
+        i += 1
+    # 出力ファイル（invoke-model 系）の保護パス判定などは通常の AWS 判定に委ねる
+    return check_aws_argv(inner, {}, "Bash", bedrock_wrapped=True)
+
+
+def bedrock_wrapper_path():
+    return os.path.realpath(os.path.join(HARNESS_HOME, "tools/aws", BEDROCK_RUN_NAME)) if HARNESS_HOME else None
+
+
+def check_bedrock_run(argv, cwd):
+    """argv[0] は bedrock_run.py。登録済みラッパーで、tools/aws/bedrock_run.py と同じ許可範囲
+    （aws bedrock-runtime 推論 4 種・python スクリプト、実行ファイルはパスなしの名前）のコマンドだけを通す。"""
+    expected = bedrock_wrapper_path()
+    if not expected or _real(argv[0], cwd) != expected:
+        return ("deny", f"登録外の {BEDROCK_RUN_NAME} は実行不可（ハーネスの tools/aws/{BEDROCK_RUN_NAME} のみ）")
+    inner = argv[1:]
+    if not inner:
+        return ("deny", f"{BEDROCK_RUN_NAME} に実行コマンドがない")
+    prog = inner[0]
+    if prog not in BEDROCK_PROGRAMS:
+        return ("deny", f"{BEDROCK_RUN_NAME} 経由で実行できるのはパスなしの aws・python・python3・uv のみ")
+    if prog == "aws":
+        return _bedrock_aws_args(inner)
+    if prog in BEDROCK_PYTHONS:
+        return _bedrock_python_args(inner[1:])
+    if len(inner) > 1 and inner[1] == "run":
+        i = 2
+        while i < len(inner) and inner[i].startswith("-"):
+            name = inner[i].split("=", 1)[0]
+            if name in UV_DENY_OPTS or inner[i].startswith("-p"):
+                return ("deny", f"{BEDROCK_RUN_NAME} 経由の uv run で --python/-p は指定できない")
+            i += 1 if "=" in inner[i] or name not in UV_VALUE_OPTS else 2
+        if i < len(inner) and inner[i] in BEDROCK_PYTHONS:
+            return _bedrock_python_args(inner[i + 1:])
+    return ("deny", f"{BEDROCK_RUN_NAME} 経由で実行できるのは aws bedrock-runtime の推論と python スクリプトのみ")
+
+
+def check_bedrock_segment(argv, assigns, cwd):
+    """セグメント内の bedrock_run.py 参照を判定する。正規形（python <ラッパー> <コマンド>）以外の実行・
+    宛先や実行ファイル探索を変える代入は拒否。該当しなければ None。"""
+    expected = bedrock_wrapper_path()
+    hits = [i for i, t in enumerate(argv)
+            if os.path.basename(t) == BEDROCK_RUN_NAME
+            or (expected and t.endswith(".py") and _real(t, cwd) == expected)]
+    if not hits:
+        return None
+    if hits != [1] or not PYTHON_RE.match(os.path.basename(argv[0])):
+        return ("deny", f"{BEDROCK_RUN_NAME} は `python3 <ハーネス>/tools/aws/{BEDROCK_RUN_NAME} <コマンド>` の形でのみ実行可"
+                        "（インタプリタオプション・uv 経由・別名・入れ子は不可）")
+    if any(BEDROCK_ENV_DENY_RE.match(k) for k in assigns if k != CHDIR):
+        return ("deny", f"{BEDROCK_RUN_NAME} と同じ命令でエンドポイント・プロキシ・証明書・PATH 等の変更は禁止")
+    return check_bedrock_run(argv[1:], cwd)
 
 
 INTERPRETERS = re.compile(r"^(python[0-9.]*|pypy[0-9.]*|sh|bash|zsh|dash|ksh|source|\.)$")
@@ -1554,6 +1671,11 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     # 認証情報ファイルの読み取り禁止
     if SECRET_WORDS.search(cmd):
         return ("deny", "認証情報ファイルへのアクセスは禁止")
+    # Bedrock API キーは bedrock_run.py の内部でだけ扱う（AI による参照・出力・別キーの指定を禁止）
+    if BEDROCK_TOKEN_RE.search(cmd):
+        return ("deny", f"Bedrock API キーの環境変数の参照・設定は禁止（tools/aws/{BEDROCK_RUN_NAME} 経由のみ）")
+    if BEDROCK_RUN_NAME in cmd and BEDROCK_ENV_ASSIGN_RE.search(cmd):
+        return ("deny", f"{BEDROCK_RUN_NAME} を含む命令でエンドポイント・プロキシ・証明書・PATH 等の変更は禁止")
     if ordered_search(((r"\baws\b", r"--with-decryption\b"), "\n"), cmd):
         return ("deny", "復号した秘密情報の取得は禁止")
 
@@ -1628,6 +1750,10 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
         elif prog in ("pushd", "popd"):
             cwd_known = False
 
+        # Bedrock API キーのラッパー（python3 <ハーネス>/tools/aws/bedrock_run.py <コマンド>）
+        r = check_bedrock_segment(argv, assigns, cwd)
+        if r:
+            return r
         # 認証更新スクリプトの例外は check_harness_exec（単独実行の正規形のみ）で判定済み
         if prog == "aws":
             r = check_aws_argv(argv, assigns, "Bash")
