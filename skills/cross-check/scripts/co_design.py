@@ -799,15 +799,17 @@ def verify_codex(codex, version):
         if record['status'] == 'PASS' or not stalled or len(attempts) >= VERIFY_ATTEMPTS:
             break
     if len(attempts) > 1:
-        record = dict(record, attempts=[{key: a[key] for key in ('status', 'elapsed_seconds', 'problems', 'log_dir')}
+        record = dict(record, attempts=[{key: a[key] for key in ('status', 'elapsed_seconds', 'problems', 'warnings', 'log_dir')}
                                         for a in attempts])
+        # 1 回目で出た警告（禁止道具の露出など）も最終結果から落とさない。
+        warnings = set().union(*(a['warnings'] for a in attempts))
         if record['status'] == 'PASS':
             # 再試行で通ったことを黙って記録しない（hook の間欠的な停滞を隠さない）。
-            record['warnings'] = sorted(set(record['warnings']) | {
-                f'first automatic check stalled ({attempts[0]["log_dir"]}); passed on the single retry. '
-                'If this repeats, check the Codex guard hook.'})
+            warnings.add(f'first automatic check stalled ({attempts[0]["log_dir"]}); passed on the single retry. '
+                         'If this repeats, check the Codex guard hook.')
         else:
             record['problems'] = sorted(set(record['problems']) | {'still failing after the single retry for a stall'})
+        record['warnings'] = sorted(warnings)
     if record['status'] == 'PASS':
         ensure_dir(ARTIFACT_ROOT)
         write_private(ARTIFACT_ROOT / 'verified_codex_version', (version + '\n').encode('utf-8'))
@@ -2853,8 +2855,10 @@ def cmd_init(args):
         # 版が変わったら自動点検（Codex 1 回）を通ったときだけ記録を更新して続ける。
         verification = verify_codex(codex, version)
         if verification['status'] != 'PASS':
+            # 再試行した場合は全試行のログ経路を示す（1 回目のログを探し回らせない）。
+            logs = ', '.join(a['log_dir'] for a in verification.get('attempts', [])) or verification['log_dir']
             raise Refused(f'Codex version gate failed: current {version!r} != verified {verified!r}; automatic check failed: '
-                          + '; '.join(verification['problems'])[:500] + f' (logs: {verification["log_dir"]})')
+                          + '; '.join(verification['problems'])[:500] + f' (logs: {logs})')
     ensure_dir(ARTIFACT_ROOT)
     started = now()
     sid = datetime.fromtimestamp(started, timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + secrets.token_hex(3)

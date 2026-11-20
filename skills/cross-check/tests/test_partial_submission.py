@@ -149,6 +149,9 @@ class PartialSubmissionTests(SubmissionBase):
         self.assertIn('adopted_from', hints['partial']['decision_set_fields'])
         self.assertIn('metrics', hints['partial']['set_fields'])
         self.assertTrue(hints['enum_choices'])
+        # 部分提出でも空のオブジェクト配列の要素形を示す（通常 scaffold と同じ hints）。
+        self.assertEqual(hints['item_shapes']['user_decisions[]']['required'], ['issue_id', 'question', 'options'])
+        self.assertEqual(hints['item_shapes']['unresolved[]']['fields']['blocking'], 'boolean')
         self.assertEqual(result['full_base']['decisions'][0]['decision'], '')
         self.assertEqual(result['full_base']['metrics']['missing_required'], -1)
         self.partial(sid, self.synthesis_changes(payload))

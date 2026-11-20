@@ -98,6 +98,6 @@ Claude와 Codex가 같은 중립 입력으로 **각자 조사·설계한 뒤** �
 - scope의 `allowed_tools`에 `web`이 있을 때만 Codex web_search를 켠다.
 - proposal 단계 정지 시 남는 `partial_messages.md`는 공개 전 Codex 소견이므로 사용자에게만 보고하고, 같은 질문을 다시 돌리기 전 Claude는 읽지 않는다.
 - 모델이 스스로 낸 INCOMPLETE(근거 부족, 응답 누락)는 조건부로 진행한다. 정지 후에는 `finalize`로 보고만 하고 재시도·우회하지 않는다.
-- 버전이 바뀌면 `init`이 자동 점검한다. 재시도로 통과했다는 경고가 나오면 사용자에게 알린다. FAIL이면 거부 사유·로그 경로를 보고하고 멈춘다.
-- 산출물 `.local/co-design/<sid>/artifacts/`·`work/`는 자동 삭제하지 않는다. `python3 $S prune --apply`는 사용자가 승인한 경우에만 실행한다.
+- 버전이 바뀌면 `init`이 자동 점검한다. 재시도로 통과했다는 경고가 나오면 사용자에게 알린다. FAIL이면 거부 사유·로그 경로를 보고하고 멈춘다. `verify-codex` 단독 점검은 task-metrics 기록 대상이 아니다.
+- 산출물 `.local/co-design/<sid>/artifacts/`·`work/`는 자동 삭제하지 않는다(사용자가 결정하면 `docs/`로 옮긴다). `python3 $S prune --apply`는 사용자가 승인한 경우에만 실행한다.
 - task-metrics: `finalize`·`reveal` 출력의 `call_summaries`(실재하는 호출별 summary 경로)를 호출마다 `--workflow debate --cross-check-summary <summary.json>`으로 한 번씩 기록한다.

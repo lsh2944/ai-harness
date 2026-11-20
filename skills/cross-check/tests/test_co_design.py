@@ -2474,8 +2474,30 @@ class SupplyAndResilienceTests(Base):
             output, code = self.env.run('init', '--question-id', 'q')
         self.assertEqual((output['status'], code), ('REFUSED', 2))
         self.assertIn('still failing after the single retry', output['error'])
+        # 両方の試行のログ経路を示す。
+        self.assertEqual(output['error'].split('(logs: ')[1].count('co-design-verify-'), 2, output['error'])
         self.assertEqual(self.env.calls(), ['verify', 'verify'])
         self.assertEqual(gate.read_text().strip(), 'codex-cli 9.9.9')
+
+    def test_retry_keeps_first_attempt_warnings_and_stops_its_process_group(self):
+        # 1 回目: 禁止道具の露出（警告）→ SIGTERM を無視する子を残して停滞。2 回目は正常。
+        gate = self.env.artifacts / 'verified_codex_version'
+        gate.write_text('codex-cli 9.9.9\n')
+        pid_file = self.env.root / 'stall-child.pid'
+        first = ("mcp('m1', 'cua_repl', 'x', {})\n" + fx.hang_with_child(pid_file) + 'time.sleep(30)\n')
+        body = ''.join('    ' + line + '\n' for line in first.splitlines())
+        self.env.behaviors({'verify': "if open(str(HERE) + '.calls').read().split().count('verify') == 1:\n" + body})
+        with patch.object(co, 'VERIFY_TIMEOUT', 2):
+            output = self.env.ok('init', '--question-id', 'q')
+        verification = output['codex_verification']
+        self.assertEqual([a['status'] for a in verification['attempts']], ['FAIL', 'PASS'])
+        self.assertTrue(any('cua_repl' in w for w in verification['warnings']), verification['warnings'])
+        self.assertTrue(any('cua_repl' in w for w in verification['attempts'][0]['warnings']))
+        child = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while not fx.process_gone(child) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(fx.process_gone(child), 'first attempt process group survived the retry')
 
     def test_non_stall_failures_are_not_retried(self):
         # hook 不在・形の変化・タイムアウト中の想定外 item は再試行しない（隠さない）。
