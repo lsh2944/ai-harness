@@ -2246,6 +2246,20 @@ class ModeMappingDocTests(unittest.TestCase):
         self.assertTrue((SKILL / 'references/debate.md').is_file())
         self.assertIn('references/debate.md', text)
 
+    def test_runner_details_split_out_with_read_triggers(self):
+        # 通常進行で読まない詳細を分け、読む契機と主側の規則は debate.md に残す（文書回帰のみ）。
+        debate = (SKILL / 'references/debate.md').read_text(encoding='utf-8')
+        runner = (SKILL / 'references/debate-runner.md').read_text(encoding='utf-8')
+        self.assertIn('(debate-runner.md)', debate)
+        for trigger in ('버전 게이트·자동 점검으로 거부', 'STOPPED·INCOMPLETE·BUDGET', '`prune`'):
+            self.assertIn(trigger, debate)
+        for kept in ('partial_messages.md', '재시도·우회하지 않는다', '--cross-check-summary', '**거부 처리:**'):
+            self.assertIn(kept, debate)
+        for moved in ('## 실행 한도·정지', '## 버전 게이트·보존', '**E2E 실측 (codex-cli', 'fidelity-json-lines-v1', 'measure-request'):
+            self.assertIn(moved, runner)
+        for heading in ('## 버전 게이트·보존', '**E2E 실측 (codex-cli', 'fidelity-json-lines-v1'):
+            self.assertNotIn(heading, debate)
+
 
 class SupplyAndResilienceTests(Base):
     """2026-10-26: 調査中断（誤停止・形式厳格・部分結果）とデータ供給（原文添付・参照データ・自動 compact・web）の補強。"""
