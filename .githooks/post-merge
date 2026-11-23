@@ -10,17 +10,23 @@ git rev-parse -q --verify ORIG_HEAD >/dev/null 2>&1 || exit 0
 changed=$(git diff --name-only ORIG_HEAD HEAD -- hooks install settings instructions skills agents tools/aws 2>/dev/null) || exit 0
 [ -n "$changed" ] || exit 0
 
+# Windows（Git Bash）の入口は setup.cmd・apply.cmd
+case $(uname -s 2>/dev/null) in
+    MINGW*|MSYS*|CYGWIN*) setup_entry=setup.cmd; apply_entry=apply.cmd; apply_name=apply.cmd ;;
+    *) setup_entry=./setup.sh; apply_entry=./apply.sh; apply_name=apply.sh ;;
+esac
+
 echo
 echo "[ai-harness] 설치본에 반영이 필요한 파일이 바뀌었습니다(이 hook은 아무것도 실행하지 않습니다):"
 printf '%s\n' "$changed" | sed 's/^/  /'
 
 if [ ! -f config.local.json ]; then
-    echo "config.local.json 이 없습니다. 이 컴퓨터에서 처음이면 터미널에서 ./setup.sh 를 실행하세요."
+    echo "config.local.json 이 없습니다. 이 컴퓨터에서 처음이면 터미널에서 $setup_entry 를 실행하세요."
     exit 0
 fi
 # aws 節が見本の値（例示アカウント ID）のままなら、適用コマンドではなく編集を案内する
 if grep -qF 'iam::123456789012:' config.local.json 2>/dev/null; then
-    echo "config.local.json 의 aws.roles 또는 aws.mfa_serial 이 아직 견본 값입니다. 실제 값으로 편집한 뒤 ./setup.sh 를 다시 실행하세요."
+    echo "config.local.json 의 aws.roles 또는 aws.mfa_serial 이 아직 견본 값입니다. 실제 값으로 편집한 뒤 $setup_entry 를 다시 실행하세요."
     exit 0
 fi
 
@@ -28,7 +34,7 @@ fi
 quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
-echo "반영하려면 터미널에서 ./apply.sh 를 실행하세요(dry-run 요약 후 apply 입력 확인을 거칩니다). 저장소 밖에서는:"
+echo "반영하려면 터미널에서 $apply_entry 를 실행하세요(dry-run 요약 후 apply 입력 확인을 거칩니다). 저장소 밖에서는:"
 # パスを含む行は printf '%s\n' で出す（dash の echo は \ を解釈するため）
-printf '%s\n' "  $(quote "$root/apply.sh")"
+printf '%s\n' "  $(quote "$root/$apply_name")"
 exit 0

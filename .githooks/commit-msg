@@ -3,18 +3,27 @@
 # 有効化: git config --local core.hooksPath .githooks（setup.sh が設定する）
 message=${1:?}
 case $message in
-    /*) ;;
+    /* | [A-Za-z]:[\\/]*) ;;  # 絶対パス（Windows の C:\... を含む）
     *) message="$(pwd)/$message" ;;
 esac
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[commit-msg] python3가 없어 커밋 메시지 검사를 실행할 수 없습니다. 커밋을 중단했습니다." >&2
+# Windows（Git Bash）には python3 がない・Microsoft Store の別名だけがあることが多いため、
+# 実際に起動できる Python 3 を python3 → python → py -3 の順で探す
+python=
+for candidate in python3 python "py -3"; do
+    if $candidate -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+        python=$candidate
+        break
+    fi
+done
+if [ -z "$python" ]; then
+    echo "[commit-msg] Python 3이 없어 커밋 메시지 검사를 실행할 수 없습니다. 커밋을 중단했습니다." >&2
     exit 1
 fi
 
-python3 tools/privacy_check.py --message "$message"
+$python tools/privacy_check.py --message "$message"
 status=$?
 if [ "$status" -ne 0 ]; then
     if [ "$status" -eq 1 ]; then

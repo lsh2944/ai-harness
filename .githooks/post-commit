@@ -12,5 +12,10 @@ else
 fi
 [ -n "$changed" ] || exit 0
 
-printf '%s\n' "[ai-harness] 설치본 반영 필요: ./apply.sh"
+# Windows（Git Bash）の入口は apply.cmd
+case $(uname -s 2>/dev/null) in
+    MINGW*|MSYS*|CYGWIN*) apply_entry=apply.cmd ;;
+    *) apply_entry=./apply.sh ;;
+esac
+printf '%s\n' "[ai-harness] 설치본 반영 필요: $apply_entry"
 exit 0

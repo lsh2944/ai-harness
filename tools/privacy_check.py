@@ -50,7 +50,8 @@ IAM_ARN = re.compile(r'arn:aws[a-z-]*:iam::([0-9]{12})')
 # 先頭の否定後読みで連続文字列の途中からの再試行を止める（長い行で計算量が二乗にならないようにする）
 EMAIL = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}')
 # 名前の後ろが名前に使える文字以外なら何でも検出する（/Users/<名前> 単独・\ = | ? # & * ! @ + % 等の前も対象）
-HOME_PATH = re.compile(r'/(?:Users|home)/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])')
+# Windows の C:\Users\<名前>・C:/Users/<名前>・JSON 中の C:\\Users\\<名前> も同じ種類として検出する
+HOME_PATH = re.compile(r'(?:/|(?<![A-Za-z])[A-Za-z]:[\\/]+)(?:Users|home|users)[\\/]+([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])')
 SECRET_PATTERNS = (
     ('AWS access key ID', re.compile(r'AKIA[0-9A-Z]{16}')),
     ('GitHub token', re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}')),
@@ -87,8 +88,19 @@ def allowed_email(value):
 
 def home_dir():
     # 実行中の利用者のホーム。'/' のような短すぎる値は誤検出にしかならないので使わない。
+    # （POSIX は /Users/x 以上、Windows は C:\Users\x 以上。区切り文字ではなく要素数で判定する）
     home = os.path.normpath(os.path.expanduser('~'))
-    return home if home.count('/') >= 2 else None
+    return home if len(Path(home).parts) >= 3 else None
+
+
+def home_in(line, home):
+    """行に現在のホームが含まれるか。Windows は \\ と / の表記・大文字小文字の違いも同じとみなす。"""
+    if not home:
+        return False
+    if os.name != 'nt':
+        return home in line
+    lower = line.lower().replace('\\\\', '\\')
+    return any(variant in lower for variant in {home.lower(), home.lower().replace('\\', '/')})
 
 
 def scan_line(line, number, words=(), home=None):
@@ -117,7 +129,7 @@ def scan_line(line, number, words=(), home=None):
         # 文末の句点（/Users/x. 等）は名前に含めずに判定する
         if m.group(1).rstrip('.') not in ALLOWED_HOME_NAMES:
             add('home path', m.group(0))
-    if home and home in line:
+    if home_in(line, home):
         add('current HOME path', home)
     lower = line.lower()
     for word, needle in words:
@@ -215,8 +227,9 @@ def git(root, *args):
 
 def repo_root():
     try:
+        # git はパスを UTF-8 で出力する（Windows の既定コードページで読むと日本語・韓国語のパスが壊れる）
         result = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
-                                timeout=GIT_TIMEOUT)
+                                encoding='utf-8', timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CheckError(f'git rev-parse failed: {type(error).__name__}') from None
     if result.returncode != 0:
@@ -368,4 +381,8 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    if os.name == 'nt':
+        # 韓国語の案内を既定コードページ（cp932 等）で出力すると失敗し、hook がコミットを止めてしまうため
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     sys.exit(main())

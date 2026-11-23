@@ -99,6 +99,24 @@ class ScanTextTests(unittest.TestCase):
         self.assertEqual(kinds('see /Users/x. and /home/u'), [])
         self.assertEqual(kinds('/Users/u=1 /home/x|y'), [])
 
+    def test_windows_home_paths(self):
+        name = 'alice'
+        for line in ('C:\\Users\\' + name + '\\work', 'c:/users/' + name, '"D:\\\\Users\\\\' + name + '\\\\x"',
+                     'cd C:/Users/' + name + ' && dir', '/c/Users/' + name + '/repo'):
+            with self.subTest(line=line):
+                self.assertEqual(kinds(line), ['home path'])
+        # 仮の名前・ドライブ文字でない英字の続き・Users 以外は対象外
+        for line in ('C:\\Users\\x\\a', 'abc:/Users', 'C:\\Program Files\\Git', 'C:\\work\\a.txt'):
+            with self.subTest(line=line):
+                self.assertEqual(kinds(line), [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows のホーム表記（\\ と /・大文字小文字）の同一視')
+    def test_current_home_windows_variants(self):
+        home = 'C:\\People\\' + 'carol'
+        for line in ('p=C:\\People\\carol\\x', 'p=c:/people/carol/x', '"C:\\\\People\\\\carol"'):
+            with self.subTest(line=line):
+                self.assertEqual(kinds(line, home=home), ['current HOME path'])
+
     def test_mask_hides_most_of_value(self):
         shown = privacy.mask(FAKE_AKIA)
         self.assertNotIn(FAKE_AKIA, shown)
@@ -114,7 +132,8 @@ class CommandTests(unittest.TestCase):
         self.home = base / 'home'
         self.repo.mkdir()
         self.home.mkdir()
-        self.env = {**os.environ, 'HOME': str(self.home), 'GIT_CONFIG_NOSYSTEM': '1',
+        # Windows の expanduser は USERPROFILE を読むため、現在のホームの検出も仮 HOME で行う
+        self.env = {**os.environ, 'HOME': str(self.home), 'USERPROFILE': str(self.home), 'GIT_CONFIG_NOSYSTEM': '1',
                     'XDG_CONFIG_HOME': str(self.home / '.config')}
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Fixture')
@@ -125,7 +144,7 @@ class CommandTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', *args],
-                              cwd=self.repo, env=self.env, capture_output=True, text=True, check=True)
+                              cwd=self.repo, env=self.env, capture_output=True, text=True, encoding='utf-8', check=True)
 
     def write(self, name, content):
         path = self.repo / name
@@ -138,7 +157,7 @@ class CommandTests(unittest.TestCase):
 
     def check(self, mode, cwd=None):
         return subprocess.run([sys.executable, str(SCRIPT), mode], cwd=cwd or self.repo, env=self.env,
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, encoding='utf-8', timeout=60)
 
     def test_staged_reports_location_kind_and_masks_value(self):
         self.write('ok.txt', 'hello\n')
@@ -261,7 +280,10 @@ class CommandTests(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'base')
         (self.repo / 'link').unlink()
-        os.symlink(FAKE_HOME_PATH + '/secret', self.repo / 'link')
+        try:
+            os.symlink(FAKE_HOME_PATH + '/secret', self.repo / 'link')
+        except OSError:
+            self.skipTest('シンボリックリンクを作成できない環境（Windows の権限不足）')
         self.git('add', 'link')
         status = self.git('diff', '--cached', '--name-status').stdout
         self.assertTrue(status.startswith('T'), status)
@@ -270,16 +292,18 @@ class CommandTests(unittest.TestCase):
         self.assertIn('link:1: home path', result.stdout)
 
     def test_pathspec_magic_characters_in_file_names(self):
-        for name in ('br[ab]c.txt', 'star*.txt', ':(glob)x.txt'):
+        # Windows はファイル名に * と : を使えないため [ ] だけを検証する
+        names = ('br[ab]c.txt',) + (() if os.name == 'nt' else ('star*.txt', ':(glob)x.txt'))
+        for name in names:
             self.write(name, f'{FAKE_EMAIL}\n')
         self.write('brac.txt', 'clean\n')  # [ab] が glob として解釈されると拾われる名前
         self.git('add', '.')
         result = self.check('--staged')
         self.assertEqual(result.returncode, 1)
-        for name in ('br[ab]c.txt', 'star*.txt', ':(glob)x.txt'):
+        for name in names:
             self.assertIn(f'{name}:1: email', result.stdout)
         self.assertNotIn('brac.txt:', result.stdout)
-        self.assertIn('3 finding(s) in 4 staged file(s)', result.stdout)
+        self.assertIn(f'{len(names)} finding(s) in {len(names) + 1} staged file(s)', result.stdout)
 
     def test_note_when_privacy_words_missing(self):
         self.write('a.txt', 'ok\n')
@@ -294,7 +318,7 @@ class CommandTests(unittest.TestCase):
         path = Path(self.temp.name) / 'COMMIT_EDITMSG'
         path.write_text(text, encoding='utf-8')
         return subprocess.run([sys.executable, str(SCRIPT), '--message', str(path)], cwd=self.repo, env=self.env,
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, encoding='utf-8', timeout=60)
 
     def test_message_checks_body(self):
         clean = 'feat: x\n\n- y\n\nCo-Authored-By: Claude <noreply' + '@anthropic.com>\n# plain comment\n'
@@ -373,7 +397,7 @@ class CommandTests(unittest.TestCase):
 
     def test_mode_is_required(self):
         result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.repo, env=self.env,
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True, encoding='utf-8', timeout=60)
         self.assertEqual(result.returncode, 2)
 
 
