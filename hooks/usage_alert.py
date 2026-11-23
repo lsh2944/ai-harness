@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Claude/Codex の使用量警告。モデル呼び出し・自動続行・強制停止は行わない。"""
-import fcntl
 import hashlib
 import json
 import os
@@ -8,6 +7,25 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+
+def try_lock(handle):
+    """排他ロックを非ブロッキングで取る。取れなければ BlockingIOError。
+    POSIX は flock、Windows は msvcrt.locking（先頭 1 バイト）。"""
+    if fcntl is not None:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    try:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        raise BlockingIOError(str(error)) from None
+
 
 INTERVAL = 30
 SCAN_BYTES = 8 * 1024 * 1024
@@ -117,14 +135,14 @@ def monitor(data, runtime, directory, now=None):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     sid = hashlib.sha256((runtime + ":" + str(data.get("session_id") or transcript)).encode()).hexdigest()[:32]
     filename = directory / (sid + ".json")
-    fd = os.open(directory / (sid + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = os.open(directory / (sid + ".lock"), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(lock)
         except BlockingIOError:
             return {}
         try:
-            state = json.loads(filename.read_text())
+            state = json.loads(filename.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             state = {}
         if event == "PreToolUse" and now - state.get("checked", 0) < INTERVAL:
@@ -165,7 +183,7 @@ def monitor(data, runtime, directory, now=None):
             state["unsupported"] = True
         fd, temp = tempfile.mkstemp(dir=directory, prefix=".usage-")
         try:
-            with os.fdopen(fd, "w") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(state, handle)
             os.replace(temp, filename)
         finally:
@@ -185,6 +203,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        # 韓国語のメッセージを既定コードページ（cp932 等）で出力すると失敗するため UTF-8 に固定する
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8")
     try:
         main()
     except Exception:
