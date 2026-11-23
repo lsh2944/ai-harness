@@ -549,6 +549,8 @@ def _is_secret_in(path, aws_dir, files):
 
 def is_secret(path):
     """パスが秘密情報、または ~/.aws 自体（再帰読み取りの起点）なら True"""
+    if WINDOWS:  # 呼び出し元が正規化していない Windows のパス（\ 区切り・大文字）も同じに扱う
+        path = P.normpath(path)
     return any(_is_secret_in(path, aws, files) for aws, files in _secret_roots())
 
 
@@ -556,6 +558,8 @@ def contains_secret(path):
     """秘密情報そのもの、または ~/.aws・既存の秘密ファイルを配下に含むディレクトリなら True"""
     if is_secret(path):
         return True
+    if WINDOWS:
+        path = P.normpath(path)
     prefix = path.rstrip("/") + "/"
     return any(t.startswith(prefix) for aws, files in _secret_roots()
                for t in [aws] + [f for f in files if P.lexists(f)])

@@ -446,6 +446,7 @@ class GitHookTests(Fixture):
         self.assertFalse((self.home / '.claude').exists(), 'post-merge must not write HOME')
 
     @unittest.skipUnless(shutil.which('dash'), 'dash not installed')
+    @unittest.skipIf(WINDOWS, 'Windows では \\ がパスの区切りでディレクトリ名に使えない')
     def test_post_merge_keeps_backslash_in_paths_under_dash(self):
         odd = self.base / 'with\\tback'
         self.git(self.base, 'clone', '-q', str(self.origin), str(odd))
