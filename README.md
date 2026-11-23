@@ -14,13 +14,13 @@ Claude Code와 Codex에 공통으로 쓰는 작업 지침·가드 hook·설정 �
 | `agents/` | 공용 서브에이전트 `code-reviewer`·`architect`·`troubleshooter`·`script-feature`와 영역별 구현 에이전트 견본 `feature-template.md` |
 | `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev`(AWS 모듈) |
 | `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh 보조) |
-| `setup.sh` | 새 컴퓨터 초기 설정(Mac/Linux). 아래 "새 컴퓨터 설정" 참고 |
-| `apply.sh` | 설치본 반영(dry-run 요약 → `install.py --apply`의 `apply` 입력 확인). 아래 "설치본 반영(apply)" 참고 |
+| `setup.sh` / `setup.cmd` | 새 컴퓨터 초기 설정(Mac/Linux / Windows). 아래 "새 컴퓨터 설정" 참고 |
+| `apply.sh` / `apply.cmd` | 설치본 반영(dry-run 요약 → `install.py --apply`의 `apply` 입력 확인). 아래 "설치본 반영(apply)" 참고 |
 | `.githooks/` | 저장소 git hook. `pre-commit`·`commit-msg`(개인정보 검사), `post-commit`(커밋 후 반영 알림), `post-merge`(pull 후 반영 알림) |
 
 ## 새 컴퓨터 설정(Mac/Linux)
 
-Windows는 아직 지원하지 않는다(`setup.sh`가 MINGW/MSYS/CYGWIN을 감지하면 안내 후 종료). git은 clone할 때 저장소의 스크립트를 실행하지 않으므로 clone만으로 자동 설치되지는 않는다. clone 후 `./setup.sh`를 한 번 실행한다.
+Windows는 아래 "새 컴퓨터 설정(Windows)"을 따른다(`setup.sh`는 MINGW/MSYS/CYGWIN을 감지하면 `setup.cmd`를 안내하고 종료). git은 clone할 때 저장소의 스크립트를 실행하지 않으므로 clone만으로 자동 설치되지는 않는다. clone 후 `./setup.sh`를 한 번 실행한다.
 
 ### ① Git·Python 준비
 
@@ -81,6 +81,32 @@ git push origin main
 ```
 
 Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다름).
+
+## 새 컴퓨터 설정(Windows)
+
+대상은 Claude Code(데스크톱 앱·CLI)다. Codex 연동·cross-check 스킬의 Windows 실행·AWS 모듈은 아직 지원하지 않는다(2단계). 명령은 PowerShell 또는 cmd 터미널에서 사용자가 직접 실행한다.
+
+1. Git·Python·GitHub CLI 설치(Python은 3.11 이상, Microsoft Store 별칭이 아닌 실제 설치본):
+
+   ```powershell
+   winget install --id Git.Git -e
+   winget install --id Python.Python.3.12 -e --scope user
+   winget install --id GitHub.cli -e
+   ```
+
+2. 인증과 clone: `gh auth login --web`으로 로그인한 뒤(자격 증명은 Windows 자격 증명 관리자에 저장된다) `gh repo clone <GitHub 사용자명>/ai-harness`.
+3. clone한 폴더에서 `.\setup.cmd`를 실행한다(`--no-apply`면 dry-run 요약까지만). 단계는 `setup.sh`와 같다: 이 저장소 전용 커밋 작성자 → `core.hooksPath=.githooks` → `config.local.json` 대화형 생성(`icacls`로 본인만 접근, AWS 모듈은 꺼진 상태) → dry-run 요약 → 확인 → `install.py --apply`(여기서 다시 `apply` 입력).
+   - `.ps1`이 아니라 `.cmd`인 이유: Windows PowerShell의 기본 실행 정책이 스크립트 실행을 막기 때문이다. 대화형 단계는 `tools/harness_setup.py`(`setup-windows`·`apply-windows`)가 처리한다.
+   - 파이프·리다이렉트·AI 도구처럼 콘솔이 아닌 stdin은 거부한다(Windows의 `isatty()`는 NUL도 참이므로 `GetConsoleMode`로 확인).
+4. Claude Code를 다시 시작하면 hook이 적용된다. 적용 후 확인할 것은 아래 "Windows 동작 메모".
+
+### Windows 동작 메모
+
+- 줄바꿈: `.gitattributes`가 텍스트를 LF로 고정한다(`core.autocrlf=true`여도 셸 스크립트·git hook이 CRLF로 바뀌지 않게). `*.cmd`·`*.ps1`만 CRLF.
+- hook 등록: `/bin/sh` 래퍼(`guard_hook.sh`) 대신 `"C:/.../python.exe" "C:/Users/<이름>/.claude/hooks/guard.py"`처럼 python을 직접 실행한다(`/` 구분자는 Git Bash·cmd 어디서 해석돼도 같은 경로). guard matcher에 `PowerShell`·`MultiEdit`이 추가된다.
+- 권한 규칙의 하네스 경로는 `Edit(//c/<경로>/hooks/**)`(드라이브 문자를 첫 요소로 한 `/` 구분자) 형식으로 렌더링된다. 스킬 문서의 실행 예시는 `& "C:/.../python.exe" "..."`(PowerShell 호출) 형식이다.
+- `settings.json`의 `env`에 `PYTHONUTF8=1`을 넣는다(시스템 코드페이지가 cp932 등이어도 한국어 출력이 깨지지 않게). hook 스크립트는 자체적으로도 stdin/stdout을 UTF-8로 고정한다.
+- git hook(`pre-commit`·`commit-msg`)은 Git Bash에서 `python3` → `python` → `py -3` 순으로 실제로 실행되는 Python을 찾는다.
 
 ## git hook(`.githooks/`)
 
@@ -156,13 +182,13 @@ Claude·Codex는 이 저장소가 아니라 `~/.claude`·`~/.codex`·`~/.agents`
 - 필요: `hooks/`·`install/`·`settings/`·`instructions/`·`skills/`·`agents/`·`tools/aws/`가 바뀌었을 때(커밋 후 post-commit, pull 후 post-merge가 알려 준다), `config.local.json`을 바꿨을 때.
 - 불필요: `README.md`·`CLAUDE.md`·`tools/privacy_check.py`·`.githooks/`·`setup.sh`·`apply.sh`·그 밖의 `tools/`(저장소에서 직접 실행하거나 설치 대상이 아님).
 
-사용법(저장소 폴더에서 터미널로 직접 실행. 다른 위치에서는 절대 경로로 실행해도 된다):
+사용법(저장소 폴더에서 터미널로 직접 실행. 다른 위치에서는 절대 경로로 실행해도 된다. Windows는 `.\apply.cmd`로 같은 단계를 실행한다):
 
 ```bash
 ./apply.sh
 ```
 
-1. `config.local.json`이 없으면 `./setup.sh` 안내 후 종료한다. 터미널이 아닌 실행(파이프·AI 도구)·Windows는 안내 후 종료한다.
+1. `config.local.json`이 없으면 `./setup.sh` 안내 후 종료한다. 터미널이 아닌 실행(파이프·AI 도구)은 거부하고, Windows는 `apply.cmd` 안내 후 종료한다.
 2. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한다. 견본 값(placeholder)이면 편집을 안내하고 종료한다. `on`이면 `--with-aws`를 붙인다.
 3. `install.py` dry-run 요약(`SAME` 생략)을 보여 준다. 변경이 없으면 "이미 최신"으로 종료한다.
 4. `install.py --config <절대 경로> [--with-aws] --apply`를 실행한다. install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다(그 밖의 입력은 취소). 인터프리터는 `config.local.json`의 `python`, 없으면 venv가 아닌 Python 3.11 이상이다.
@@ -191,6 +217,8 @@ python3 -m unittest discover -s tools/aws -t tools/aws
 ```
 
 `install/tests`는 venv가 아닌 기반 인터프리터로 install.py를 하위 프로세스 실행한다(Python 3.11 이상 필요, `tomllib`).
+
+Windows에서는 `python3` 대신 `python`(또는 `py -3`)으로 실행한다. 심볼릭 링크를 만들 수 없는 환경(개발자 모드·관리자 권한 없음)·Windows에서 만들 수 없는 파일명(`*`·`:`·개행)·pty·FIFO·`/bin/zsh`가 필요한 검증은 사유를 남기고 skip한다. `setup.sh`·`apply.sh`(sh·pty) 테스트는 Mac/Linux 전용이고, Windows는 `setup-windows`·`apply-windows` 테스트가 대신한다. `skills/cross-check/tests`는 macOS 전용이다. GitHub Actions(`.github/workflows/test.yml`)가 ubuntu·macos·windows에서 이 스위트를 실행한다(Mac/Linux는 경로에 `work`가 없는 `/tmp` 복제에서 실행).
 
 `tools/tests`에는 `test_privacy_check.py`(개인정보 검사)와 `test_setup.py`(setup.sh·apply.sh·`.githooks`·`harness_setup.py`)도 들어 있다. `test_setup.py`는 작업 트리(Git 제외 파일 제외)를 임시 origin에 복제해 로컬 clone하고 임시 HOME·pty에서 실행하며, `install.py --apply`는 스텁으로만 확인한다. 개별 실행:
 
@@ -228,4 +256,7 @@ python3 tools/privacy_check.py --all
 - hook 인터프리터가 사라지면 Claude는 `guard_hook.sh`가 거부를 반환하지만, Codex는 신뢰 절차 때문에 python을 직접 실행하므로 인터프리터 소실·hook 타임아웃 시 가드 없이 실행될 수 있다. Python을 업그레이드하면 install.py를 다시 실행한다.
 - Codex exec 모드의 일부 도구(node_repl 등 MCP 외 경로)는 hook 범위 밖이다.
 - 가드 메시지·사용량 경고 문구는 한국어로 고정되어 있다.
+- **Windows의 PowerShell 판정(`check_powershell`)** 은 Bash 판정보다 더 단순한 문자열 판정이다. 세그먼트(`;`·`|`·`&&`·`||`·괄호·`$(`) 분리와 간단한 따옴표·백틱 처리만 하고, 변수(`$x`) 경유 경로·스크립트 블록 안의 동작·`.ps1` 파일 내용은 판정하지 못한다. 판정할 수 없는 재해석·별도 프로세스 실행(`Invoke-Expression`·`-EncodedCommand`·`Start-Process`·`cmd /c`·`wsl`)은 승인 요청이다. 외부 명령(git·aws·python 등)은 Bash 판정을 재사용한다. 보호 경로 문자열과 쓰기 cmdlet·`>`가 같은 구간에 있으면 승인 요청으로 보완한다.
+- Windows의 hook은 python을 직접 실행하므로, 인터프리터 경로가 사라지면(Python 제거·업그레이드로 경로 변경) hook 실행 자체가 실패해 Claude가 미판정으로 실행할 수 있다(POSIX의 `guard_hook.sh` 같은 래퍼가 없다). guard.py 안의 예외는 excepthook으로 deny를 반환한다. Python을 바꾸면 `apply.cmd`를 다시 실행한다.
+- Windows의 파일 검사(task_metrics·investigate·repo_context)는 `dir_fd`·`O_NOFOLLOW`가 없어 요소별 `lstat`으로 심볼릭 링크·정션을 거부한 뒤 연다(검사와 open 사이의 바꿔치기는 막지 못한다). OneDrive 클라우드 파일의 재분석 지점은 링크로 보지 않는다. 권한 비트(0600·0700)는 Windows에서 읽기 전용 속성만 의미하므로 `config.local.json`만 `icacls`로 본인 접근으로 제한한다.
 - `skills/handoff`는 MIT 라이선스(원 저작자 표기는 `skills/handoff/LICENSE.txt`)를 따른다.
