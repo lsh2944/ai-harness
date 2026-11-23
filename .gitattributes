@@ -1,0 +1,5 @@
+# 저장소의 텍스트는 LF로 고정한다. Windows의 core.autocrlf=true에서도 셸 스크립트·git hook이
+# CRLF로 바뀌어 Git Bash에서 깨지지 않게 하기 위함이다. PowerShell·cmd 스크립트만 CRLF.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

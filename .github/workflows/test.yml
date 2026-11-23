@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: unit tests
+        shell: bash
+        run: |
+          set -u
+          status=0
+          for suite in hooks/tests install/tests skills/cross-check/tests tools/tests \
+                       tools/investigation tools/task_metrics tools/aws; do
+            echo "::group::$suite"
+            python -m unittest discover -s "$suite" -t "$suite" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+      - name: privacy check (tracked files)
+        shell: bash
+        run: python tools/privacy_check.py --all
