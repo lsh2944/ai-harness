@@ -159,16 +159,16 @@ class TaskMetricsTests(unittest.TestCase):
                              execution_status='COMPLETE', workflow='independent')
         self.store.write_text(json.dumps(legacy) + '\n')
         self.assertEqual(self.load()[0]['workflow'], 'independent')
-        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store)], capture_output=True, text=True, timeout=5)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store)], capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['groups'][0]['workflow'], 'independent')
         command = self.command('new-independent')
         command[command.index('code-review')] = 'independent'
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 2)
         self.assertIn('invalid choice', result.stderr)
         command[command.index('independent')] = 'debate'
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.load()), 2)
 
@@ -182,7 +182,10 @@ class TaskMetricsTests(unittest.TestCase):
     def test_symlink_file_and_parent_rejected(self):
         metrics.append_record(self.store, self.record())
         link = self.root / 'linked.jsonl'
-        link.symlink_to(self.store)
+        try:
+            link.symlink_to(self.store)
+        except OSError:
+            self.skipTest('シンボリックリンクを作成できない環境（Windows の権限不足）')
         directory_link = self.root / 'alias'
         directory_link.symlink_to(self.root, target_is_directory=True)
         for path in (link, directory_link / 'records.jsonl'):
@@ -196,11 +199,14 @@ class TaskMetricsTests(unittest.TestCase):
         metrics.append_record(self.store, self.record())
         linked = self.root / 'hardlink.jsonl'
         os.link(self.store, linked)
-        fifo = self.root / 'fifo.jsonl'
-        os.mkfifo(fifo)
+        paths = [linked]
+        if hasattr(os, 'mkfifo'):  # Windows には FIFO がない
+            fifo = self.root / 'fifo.jsonl'
+            os.mkfifo(fifo)
+            paths.append(fifo)
         directory = self.root / 'directory.jsonl'
         directory.mkdir()
-        for path in (linked, fifo, directory):
+        for path in paths + [directory]:
             for write in (False, True):
                 with self.subTest(path=path, write=write), self.assertRaises((OSError, ValueError)):
                     with metrics.safe_file(path, write=write):
@@ -246,19 +252,20 @@ class TaskMetricsTests(unittest.TestCase):
 
     def test_cli_help_record_summary_and_errors(self):
         for command in ([], ['record'], ['summary']):
-            result = subprocess.run([sys.executable, str(SCRIPT), *command, '--help'], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([sys.executable, str(SCRIPT), *command, '--help'], capture_output=True, text=True, encoding='utf-8', timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
-        result = subprocess.run(self.command(), capture_output=True, text=True, timeout=5)
+        result = subprocess.run(self.command(), capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.store.stat().st_mode & 0o777, 0o600)
-        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store), '--task', 'task-1'], capture_output=True, text=True, timeout=5)
+        if os.name != 'nt':  # Windows の権限ビットは読み取り専用属性しか表さない
+            self.assertEqual(self.store.stat().st_mode & 0o777, 0o600)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store), '--task', 'task-1'], capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['groups'][0]['metrics']['input_tokens']['sum'], None)
-        result = subprocess.run(self.command('invalid') + ['--elapsed-seconds', 'nan'], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(self.command('invalid') + ['--elapsed-seconds', 'nan'], capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(len(self.load()), 1)
         self.store.write_bytes(b'private corrupt content\n')
-        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store)], capture_output=True, text=True, timeout=5)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'summary', '--store', str(self.store)], capture_output=True, text=True, encoding='utf-8', timeout=5)
         self.assertEqual(result.returncode, 2)
         self.assertNotIn('private corrupt content', result.stdout + result.stderr)
 

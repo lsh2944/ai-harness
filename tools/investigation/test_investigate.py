@@ -13,6 +13,15 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("investigate", Path(__file__).with_name("investigate.py"))
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
+WINDOWS = os.name == "nt"
+
+
+def make_symlink(test, link, target, directory=False):
+    """シンボリックリンクを作る。作れない環境（Windows の権限不足）ではそのテストをスキップする。"""
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError:
+        test.skipTest("シンボリックリンクを作成できない環境（Windows の権限不足）")
 
 
 class InvestigationTests(unittest.TestCase):
@@ -86,8 +95,9 @@ class InvestigationTests(unittest.TestCase):
         self.job()
         folder = self.root / app.CACHE_DIR
         entry = next(folder.glob("*.json"))
-        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(entry.stat().st_mode), 0o600)
+        if not WINDOWS:  # Windows の権限ビットは読み取り専用属性しか表さない
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(entry.stat().st_mode), 0o600)
         entry.write_text("broken")
         self.assertEqual(self.job()["cache"], "miss")
 
@@ -114,7 +124,7 @@ class InvestigationTests(unittest.TestCase):
                 self.assertEqual(self.job(exit_code=exit_code)["cache"], "hit")
 
     def test_cache_symlink_refused_and_no_cache_available(self):
-        (self.root / app.CACHE_DIR).symlink_to(self.root, target_is_directory=True)
+        make_symlink(self, self.root / app.CACHE_DIR, self.root, directory=True)
         self.assertFalse(self.job()["ok"])
         result = app.run_job({"files": ["sender.log"]}, use_cache=False)
         self.assertTrue(result["ok"])
@@ -164,8 +174,8 @@ class InvestigationTests(unittest.TestCase):
         self.assertIn("too broad", result.stdout)
 
     def test_symlink_file_and_parent_refused(self):
-        (self.root / "alias.log").symlink_to(self.root / "sender.log")
-        (self.root / "alias").symlink_to(self.root, target_is_directory=True)
+        make_symlink(self, self.root / "alias.log", self.root / "sender.log")
+        make_symlink(self, self.root / "alias", self.root, directory=True)
         for name in ("alias.log", "alias/sender.log"):
             self.assertFalse(self.job(files=[name])["ok"])
 
@@ -233,7 +243,8 @@ class InvestigationTests(unittest.TestCase):
         full = json.loads(Path(output["full_report"]).read_text())
         self.assertEqual(len(full["jobs"]), 8)
         self.assertEqual(len(full["jobs"][7]["files"]), 20)
-        self.assertEqual(stat.S_IMODE(Path(output["full_report"]).stat().st_mode), 0o600)
+        if not WINDOWS:
+            self.assertEqual(stat.S_IMODE(Path(output["full_report"]).stat().st_mode), 0o600)
 
     def test_total_job_byte_budget(self):
         with patch.object(app, "MAX_JOB_BYTES", 2):

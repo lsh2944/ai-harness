@@ -3,7 +3,6 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import json
 import math
 import os
@@ -12,6 +11,13 @@ import re
 import stat
 import sys
 import time
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+WINDOWS = os.name == 'nt'
 
 # 既定はこのリポジトリの .local/（Git 管理外）。必要なら --store で変更する。
 DEFAULT_STORE = Path(__file__).resolve().parents[2] / '.local' / 'task-metrics.jsonl'
@@ -93,11 +99,58 @@ def safe_path(value):
     return path
 
 
+def _is_link(path):
+    """シンボリックリンク・ジャンクションか（Windows）。OneDrive のクラウドファイルの再解析ポイントは対象外。"""
+    info = os.lstat(path)
+    junction = getattr(os.path, 'isjunction', lambda _p: False)(path)
+    return stat.S_ISLNK(info.st_mode) or junction, info
+
+
+@contextmanager
+def _safe_file_windows(path, write):
+    """Windows 版の safe_file。dir_fd・O_NOFOLLOW がないため、要素ごとに lstat でリンクでないことを確かめてから開く
+    （検査と open の間の差し替えは防げない補助的な検査）。"""
+    current = Path(path.anchor)
+    for part in path.parts[1:-1]:
+        current = current / part
+        if write:
+            try:
+                os.mkdir(current, 0o700)
+            except FileExistsError:
+                pass
+        link, info = _is_link(current)
+        if link or not stat.S_ISDIR(info.st_mode):
+            raise ValueError('path contains a link or a non-directory')
+    flags = (os.O_RDWR if write else os.O_RDONLY) | os.O_BINARY | getattr(os, 'O_NOINHERIT', 0)
+    fd = None
+    try:
+        if os.path.lexists(path) and _is_link(path)[0]:
+            raise ValueError('file must not be a link')
+        if write:
+            try:
+                fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                fd = os.open(path, flags)
+        else:
+            fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('file must be regular with a single hard link')
+        yield fd
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 @contextmanager
 def safe_file(value, write=False):
     path = safe_path(value)
     if write and path.suffix != '.jsonl':
         raise ValueError('store path must end with .jsonl')
+    if WINDOWS:
+        with _safe_file_windows(path, write) as fd:
+            yield fd
+        return
     parent_fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     fd = None
     try:
@@ -129,12 +182,39 @@ def safe_file(value, write=False):
         os.close(parent_fd)
 
 
+def _try_lock(fd, write):
+    """非ブロッキングのロック。POSIX は flock（読み取りは共有）、Windows は msvcrt.locking（先頭 1 バイトの排他。
+    共有ロックはないため読み取りも排他になる）。取れなければ BlockingIOError。"""
+    if fcntl is not None:
+        fcntl.flock(fd, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        return
+    position = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        raise BlockingIOError(str(error)) from None
+    finally:
+        os.lseek(fd, position, os.SEEK_SET)
+
+
+def _unlock(fd):
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
+
 @contextmanager
 def locked(fd, write):
     deadline = time.monotonic() + 5
     while True:
         try:
-            fcntl.flock(fd, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+            _try_lock(fd, write)
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -143,7 +223,7 @@ def locked(fd, write):
     try:
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _unlock(fd)
 
 
 def read_bytes(fd, limit):
@@ -316,4 +396,8 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    if WINDOWS:
+        # 韓国語・日本語を含む help・出力を既定コードページ（cp932 等）で書くと失敗するため UTF-8 に固定する
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
     sys.exit(main())

@@ -6,11 +6,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import stat
 import sys
+import tempfile
 import uuid
+
+try:
+    import pwd
+except ImportError:  # Windows
+    pwd = None
+WINDOWS = os.name == "nt"
 
 # 調査対象のプロジェクトルートは実行時の cwd（プロジェクトルートで実行する）。環境変数での差し替えは設けない。
 try:
@@ -26,12 +32,17 @@ def too_broad_root(path):
     """/・ホームやその上位・一時領域の根のように、調査ルートとして広すぎるか。ホーム配下の隠しディレクトリ内も対象。"""
     path = Path(path).resolve()
     homes = {Path.home().resolve()}
-    try:
-        homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
-    except (KeyError, OSError):
-        pass
+    if pwd is not None:
+        try:
+            homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
+        except (KeyError, OSError):
+            pass
     broad = {Path(p).resolve() for p in ("/", "/tmp", "/private", "/private/tmp", "/var", "/private/var",
                                          "/var/folders", "/Users", "/home", "/Volumes")}
+    if WINDOWS:
+        # ドライブの根・C:\Users・一時領域の根も広すぎる
+        temp = Path(tempfile.gettempdir()).resolve()
+        broad |= {Path(path.anchor), Path(Path.home().anchor) / "Users", temp, temp.parent}
     if path in broad or any(home == path or home.is_relative_to(path) for home in homes):
         return True
     # ホーム配下の隠しディレクトリ（~/.aws・~/.codex・~/.claude・~/.agents 等の設定・認証領域）を含む場所も拒否する
@@ -76,28 +87,89 @@ def relative_path(value):
     return path
 
 
+# ---- ディレクトリ単位のファイル操作 ----
+# POSIX は dir_fd と O_NOFOLLOW で要素ごとにリンクを辿らず開く。Windows には dir_fd・O_NOFOLLOW がないため、
+# ディレクトリを Path で持ち、要素ごとに lstat でリンク・ジャンクションでないことを確かめる（検査と open の間の
+# 差し替えは防げない補助的な検査）。OneDrive のクラウドファイルの再解析ポイントはリンクとみなさない。
+def _no_link(path, directory=False):
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or getattr(os.path, "isjunction", lambda _p: False)(path):
+        raise OSError(f"refusing link: {path.name}")
+    if directory and not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"not a directory: {path.name}")
+    return info
+
+
+def _open_dir(path):
+    if WINDOWS:
+        _no_link(Path(path), directory=True)
+        return Path(path)
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def _child_dir(directory, part):
+    if WINDOWS:
+        return _open_dir(directory / part)
+    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+    os.close(directory)
+    return child
+
+
+def _close_dir(directory):
+    if not WINDOWS:
+        os.close(directory)
+
+
+def _open_in(directory, name, flags, mode=0o777):
+    if WINDOWS:
+        target = directory / name
+        if os.path.lexists(target):
+            _no_link(target)
+        return os.open(target, flags | os.O_BINARY, mode)
+    return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=directory)
+
+
+def _stat_in(directory, name):
+    if WINDOWS:
+        return os.stat(directory / name, follow_symlinks=False)
+    return os.stat(name, dir_fd=directory, follow_symlinks=False)
+
+
+def _replace_in(directory, source, target):
+    if WINDOWS:
+        os.replace(directory / source, directory / target)
+    else:
+        os.replace(source, target, src_dir_fd=directory, dst_dir_fd=directory)
+
+
+def _unlink_in(directory, name):
+    if WINDOWS:
+        os.unlink(directory / name)
+    else:
+        os.unlink(name, dir_fd=directory)
+
+
 def read_input(value):
     """Open every path component without following symlinks; bounded regular files only."""
     path = relative_path(value)
-    directory = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = _open_dir(ROOT)
     try:
         for part in path.parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            directory = _child_dir(directory, part)
+        fd = _open_in(directory, path.name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as stream:
             before = os.fstat(stream.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_BYTES:
                 raise ValueError("input must be a regular file no larger than 32 MiB")
             data = stream.read(MAX_BYTES + 1)
             after = os.fstat(stream.fileno())
-            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-            current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            # Windows の st_ctime は fstat と stat で意味が揃わない（作成時刻・変更時刻）ため比較に使わない
+            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, None if WINDOWS else s.st_ctime_ns)
+            current = _stat_in(directory, path.name)
             if len(data) > MAX_BYTES or signature(before) != signature(after) or signature(after) != signature(current):
                 raise ValueError("input changed during read or exceeds 32 MiB; retry after it stabilizes")
     finally:
-        os.close(directory)
+        _close_dir(directory)
     return {"path": str(ROOT / path), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}, data
 
 
@@ -127,6 +199,9 @@ def cache_directory():
         path.mkdir(mode=0o700)
     except FileExistsError:
         pass
+    if WINDOWS:
+        # 所有者・権限ビットの検査は POSIX のみ（Windows はリンクでないディレクトリであることだけ確かめる）
+        return _open_dir(path)
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     info = os.fstat(fd)
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
@@ -137,14 +212,14 @@ def cache_directory():
 
 def write_json(fd, name, value):
     temporary = ".tmp-" + uuid.uuid4().hex
-    dest = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    dest = _open_in(fd, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(dest, "wb") as stream:
             stream.write(encode(value))
-        os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+        _replace_in(fd, temporary, name)
     finally:
         try:
-            os.unlink(temporary, dir_fd=fd)
+            _unlink_in(fd, temporary)
         except FileNotFoundError:
             pass
 
@@ -156,7 +231,7 @@ def cached_result(key, build, enabled):
     name = key + ".json"
     try:
         try:
-            source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            source = _open_in(fd, name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             with os.fdopen(source, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError("cache entry must be regular")
@@ -174,7 +249,7 @@ def cached_result(key, build, enabled):
         write_json(fd, name, entry)
         return result, "miss"
     finally:
-        os.close(fd)
+        _close_dir(fd)
 
 
 def run_job(job, use_cache=True):
@@ -235,7 +310,7 @@ def display_report(results):
         try:
             write_json(fd, name, report)
         finally:
-            os.close(fd)
+            _close_dir(fd)
     except (OSError, ValueError) as exc:
         storage_error = str(exc)[:600]
     compact = []
@@ -286,4 +361,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if WINDOWS:
+        # ログの日本語・韓国語を既定コードページ（cp932 等）で出力すると失敗するため UTF-8 に固定する
+        sys.stdout.reconfigure(encoding="utf-8")
     sys.exit(main())
