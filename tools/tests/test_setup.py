@@ -18,6 +18,34 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 BASE_PYTHON = getattr(sys, '_base_executable', None) or sys.executable
 HAS_TOMLLIB = sys.version_info >= (3, 11)
+WINDOWS = os.name == 'nt'
+SETUP_ENTRY = 'setup.cmd' if WINDOWS else './setup.sh'
+APPLY_ENTRY = 'apply.cmd' if WINDOWS else './apply.sh'
+
+
+def find_sh():
+    """hook を直接実行する sh。Windows は PATH にないことが多いため Git for Windows 同梱の sh.exe を使う。"""
+    found = shutil.which('sh')
+    if found or not WINDOWS:
+        return found or 'sh'
+    git = shutil.which('git')
+    for candidate in ([Path(git).resolve().parents[1] / 'bin' / 'sh.exe'] if git else []):
+        if candidate.is_file():
+            return str(candidate)
+    return 'sh'
+
+
+SH = find_sh()
+# setup.sh・apply.sh は sh と pty で端末入力を再現する（Windows は setup.cmd・apply.cmd を WindowsSetupTests で検証）
+POSIX_SCRIPTS = unittest.skipIf(WINDOWS, 'setup.sh・apply.sh（sh・pty）は Mac/Linux 用')
+# 擬似端末のない環境で「端末から答えを入力した」状態を再現する起動スクリプト（stdin だけを端末扱いにする）
+TTY_SHIM = ('import io, runpy, sys\n'
+            'class Tty(io.StringIO):\n'
+            '    def isatty(self):\n'
+            '        return True\n'
+            'sys.stdin = Tty(sys.stdin.read())\n'
+            'sys.argv = sys.argv[1:]\n'
+            'runpy.run_path(sys.argv[0], run_name="__main__")\n')
 FAKE_ACCOUNT = ''.join(['3141', '5926', '5358'])
 STUB_INSTALL = '''import json, os, sys
 if '--apply' in sys.argv:
@@ -72,11 +100,16 @@ class Fixture(unittest.TestCase):
         self.bin = self.base / 'bin'
         self.home.mkdir()
         self.bin.mkdir()
-        (self.bin / 'python3').symlink_to(BASE_PYTHON)
-        self.env = {
-            'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
-            'GIT_CONFIG_NOSYSTEM': '1', 'XDG_CONFIG_HOME': str(self.home / '.config'), 'TERM': 'dumb',
-        }
+        if WINDOWS:
+            # git・Python・Git Bash の sh を使うため PATH はそのまま。Path.home() は USERPROFILE を読む
+            self.env = {**os.environ, 'HOME': str(self.home), 'USERPROFILE': str(self.home),
+                        'GIT_CONFIG_NOSYSTEM': '1', 'XDG_CONFIG_HOME': str(self.home / '.config'), 'PYTHONUTF8': '1'}
+        else:
+            (self.bin / 'python3').symlink_to(BASE_PYTHON)
+            self.env = {
+                'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
+                'GIT_CONFIG_NOSYSTEM': '1', 'XDG_CONFIG_HOME': str(self.home / '.config'), 'TERM': 'dumb',
+            }
         self.origin = self.base / 'origin'
         self.make_origin()
         self.clone = self.base / 'clone'
@@ -86,7 +119,7 @@ class Fixture(unittest.TestCase):
         self.temp.cleanup()
 
     def git(self, cwd, *args, check=True):
-        return subprocess.run(['git', *args], cwd=cwd, env=self.env, capture_output=True, text=True,
+        return subprocess.run(['git', *args], cwd=cwd, env=self.env, capture_output=True, text=True, encoding='utf-8',
                               check=check, timeout=60)
 
     def make_origin(self):
@@ -124,7 +157,8 @@ class Fixture(unittest.TestCase):
                 'response_language': 'Korean', 'comment_language': 'Japanese', **extra}
         path = self.clone / 'config.local.json'
         path.write_text(json.dumps(data), encoding='utf-8')
-        path.chmod(0o600)
+        if not WINDOWS:
+            path.chmod(0o600)
 
     def use_stub_install(self):
         (self.clone / 'install/install.py').write_text(STUB_INSTALL, encoding='utf-8')
@@ -132,6 +166,7 @@ class Fixture(unittest.TestCase):
         self.env['STUB_MARKER'] = str(self.marker)
 
 
+@POSIX_SCRIPTS
 @unittest.skipUnless(HAS_TOMLLIB, 'install.py dry-run needs Python 3.11+')
 class SetupScriptTests(Fixture):
     ANSWERS = ['Test Person', 'person@example.com', '', '', '', '', 'n']
@@ -159,7 +194,8 @@ class SetupScriptTests(Fixture):
         root = self.clone.resolve()
         self.assertEqual(config['extra_protected_paths'], [str(root / '.githooks'), str(root / 'tools/privacy_check.py'),
                                                            str(root / 'tools/harness_setup.py'), str(root / 'setup.sh'),
-                                                           str(root / 'apply.sh')])
+                                                           str(root / 'apply.sh'), str(root / 'setup.cmd'),
+                                                           str(root / 'apply.cmd')])
         self.assertIn('AWS 모듈(--with-aws): off', out)
         self.assertIn('DRY-RUN:', out)
         self.assertIn('--no-apply', out)
@@ -256,6 +292,7 @@ class SetupScriptTests(Fixture):
         self.assertIn('usage', out)
 
 
+@POSIX_SCRIPTS
 class ApplyStepTests(Fixture):
     """5) の適用段階。スタブ install.py で、続行を選んだときだけ --apply が端末から呼ばれることを確かめる。"""
 
@@ -330,7 +367,8 @@ class GitHookTests(Fixture):
         cases = {
             'wide.txt': ('key ' + FAKE_ACCOUNT + '\n').encode('utf-16'),  # BOM 付き UTF-16
             'big.txt': (('x' * 200 + '\n') * 8000 + 'id ' + FAKE_ACCOUNT + '\n').encode(),  # 1MiB 超
-            'we[ir]d *name.txt': ('id ' + FAKE_ACCOUNT + '\n').encode(),
+            # Windows はファイル名に * を使えない
+            ('we[ir]d name.txt' if WINDOWS else 'we[ir]d *name.txt'): ('id ' + FAKE_ACCOUNT + '\n').encode(),
         }
         for name, data in cases.items():
             with self.subTest(name=name):
@@ -346,7 +384,10 @@ class GitHookTests(Fixture):
         self.git(self.clone, 'add', 'link')
         self.assertEqual(self.commit(self.clone).returncode, 0)
         (self.clone / 'link').unlink()
-        os.symlink('/Users/' + 'alice' + '/secret', self.clone / 'link')
+        try:
+            os.symlink('/Users/' + 'alice' + '/secret', self.clone / 'link')
+        except OSError:
+            return  # シンボリックリンクを作れない環境（Windows の権限不足）ではリンクの型変更を省く
         self.git(self.clone, 'add', 'link')
         result = self.commit(self.clone)
         self.assertNotEqual(result.returncode, 0)
@@ -379,14 +420,14 @@ class GitHookTests(Fixture):
         for name in ('python3', 'python'):
             (fake / name).write_text(script)
             (fake / name).chmod(0o755)
-        self.env['PATH'] = f'{fake}:{self.env["PATH"]}'
+        self.env['PATH'] = f'{fake}{os.pathsep}{self.env["PATH"]}'
 
     def test_post_merge_without_config_suggests_setup(self):
         self.poison_python()
         self.origin_commit('skills/new-skill/SKILL.md', 'x\n')
         out = self.pull()
         self.assertIn('skills/new-skill/SKILL.md', out)
-        self.assertIn('./setup.sh', out)
+        self.assertIn(SETUP_ENTRY, out)
         self.assertFalse(self.python_called.exists())
 
     def test_post_merge_with_config_only_prints_commands(self):
@@ -396,9 +437,9 @@ class GitHookTests(Fixture):
         out = self.pull()
         self.assertFalse(self.python_called.exists(), 'post-merge must not run Python')
         self.assertIn('instructions/core.md', out)
-        root = str(self.clone.resolve())
-        self.assertIn('./apply.sh', out)
-        self.assertIn(f"'{root}/apply.sh'", out)
+        root = self.clone.resolve().as_posix()  # git は Windows でも / 区切りでルートを返す
+        self.assertIn(APPLY_ENTRY, out)
+        self.assertIn(f"'{root}/{Path(APPLY_ENTRY).name}'", out)
         self.assertNotIn('install.py', out)
         self.assertNotIn('--apply', out)
         self.assertNotIn('DRY-RUN:', out)
@@ -428,7 +469,7 @@ class GitHookTests(Fixture):
         out = self.pull()
         self.assertNotIn('ai-harness', out)
 
-    NOTICE = '[ai-harness] 설치본 반영 필요: ./apply.sh'
+    NOTICE = '[ai-harness] 설치본 반영 필요: ' + ('apply.cmd' if WINDOWS else './apply.sh')
 
     def test_post_commit_notifies_only_for_install_paths(self):
         cases = [('hooks/new_hook.py', True), ('tools/aws/new.sh', True), ('skills/s/SKILL.md', True),
@@ -449,8 +490,8 @@ class GitHookTests(Fixture):
         self.assertFalse((self.home / '.claude').exists(), 'post-commit must not write HOME')
 
     def run_post_commit(self, cwd):
-        return subprocess.run(['sh', str(self.clone / '.githooks/post-commit')], cwd=cwd, env=self.env,
-                              capture_output=True, text=True, timeout=30)
+        return subprocess.run([SH, str(self.clone / '.githooks/post-commit')], cwd=cwd, env=self.env,
+                              capture_output=True, text=True, encoding='utf-8', timeout=30)
 
     def test_post_commit_handles_root_and_merge_commits_without_python(self):
         self.poison_python()
@@ -494,6 +535,7 @@ class GitHookTests(Fixture):
         self.assertFalse(self.python_called.exists(), 'post-commit must not run Python')
 
 
+@POSIX_SCRIPTS
 class ApplyScriptTests(Fixture):
     """apply.sh。スタブ install.py で、dry-run 要約の後に --apply が端末から呼ばれることを確かめる。"""
 
@@ -604,7 +646,7 @@ class ApplyScriptTests(Fixture):
 class HelperTests(Fixture):
     def helper(self, *args):
         return subprocess.run([sys.executable, str(self.clone / 'tools/harness_setup.py'), *args], cwd=self.clone,
-                              env=self.env, capture_output=True, text=True, timeout=60)
+                              env=self.env, capture_output=True, text=True, encoding='utf-8', timeout=60)
 
     def test_write_config_does_not_overwrite(self):
         args = ['write-config', '--project-root', '~/p', '--response-language', 'Korean', '--comment-language', 'Japanese']
@@ -640,7 +682,7 @@ class HelperTests(Fixture):
     def test_dry_run_without_config_fails(self):
         result = self.helper('dry-run')
         self.assertEqual(result.returncode, 1)
-        self.assertIn('setup.sh', result.stderr)
+        self.assertIn('setup.cmd' if WINDOWS else 'setup.sh', result.stderr)
 
     def test_dry_run_reports_no_change_with_exit_3(self):
         self.write_config()
@@ -649,6 +691,79 @@ class HelperTests(Fixture):
         result = self.helper('dry-run')
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn('SAME 1', result.stdout)
+
+    def test_apply_command_quoting(self):
+        self.write_config(python=str(self.home / 'Python 312' / 'python.exe'))
+        command = self.helper('apply-command').stdout.strip()
+        if WINDOWS:
+            # PowerShell に貼り付けて動く形（& 'パス' ... --apply）
+            self.assertTrue(command.startswith("& '"), command)
+            self.assertIn("python.exe' '", command)
+        else:
+            self.assertIn("'" + str(self.home / 'Python 312' / 'python.exe') + "'", command)
+        self.assertTrue(command.endswith('--apply'), command)
+
+
+@unittest.skipUnless(HAS_TOMLLIB, 'install.py dry-run needs Python 3.11+')
+class WindowsSetupTests(Fixture):
+    """setup.cmd・apply.cmd が呼ぶ setup-windows・apply-windows。端末入力は stdin を端末扱いにする起動スクリプトで再現する
+    （Python だけで動くため全 OS で実行する）。"""
+
+    def run_helper(self, *args, answers=None):
+        script = [str(self.clone / 'tools/harness_setup.py'), *args]
+        command = [BASE_PYTHON, *script] if answers is None else [BASE_PYTHON, '-c', TTY_SHIM, *script]
+        return subprocess.run(command, cwd=self.base, env=self.env, input=None if answers is None else
+                              ''.join(a + '\n' for a in answers), stdin=subprocess.DEVNULL if answers is None else None,
+                              capture_output=True, text=True, encoding='utf-8', timeout=120)
+
+    def test_non_terminal_is_refused_without_changes(self):
+        for args in (['setup-windows'], ['apply-windows']):
+            with self.subTest(args=args):
+                result = self.run_helper(*args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('터미널', result.stderr)
+        self.assertEqual(self.local('core.hooksPath'), '')
+        self.assertFalse((self.clone / 'config.local.json').exists())
+
+    def test_first_run_configures_repo_and_stops_before_apply(self):
+        self.use_stub_install()
+        project = str(self.home / 'work')
+        answers = ['Tester', 'tester@example.com', project, BASE_PYTHON, '', '']
+        result = self.run_helper('setup-windows', '--no-apply', answers=answers)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local('user.name'), self.local('user.email'), self.local('core.hooksPath')),
+                         ('Tester', 'tester@example.com', '.githooks'))
+        config = self.config()
+        self.assertEqual((config['project_root'], config['python']), (project, BASE_PYTHON))
+        self.assertNotIn('aws', config)
+        root = self.clone.resolve()
+        self.assertIn(str(root / 'setup.cmd'), config['extra_protected_paths'])
+        self.assertIn('--no-apply', result.stdout)
+        self.assertFalse(self.marker.exists())
+        # 再実行は済んだ段階を飛ばし、質問しない
+        again = self.run_helper('setup-windows', '--no-apply', answers=[])
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn('건너뜁니다', again.stdout)
+
+    def test_apply_runs_install_after_confirmation(self):
+        self.git(self.clone, 'config', '--local', 'user.name', 'A')
+        self.git(self.clone, 'config', '--local', 'user.email', 'a@example.com')
+        self.git(self.clone, 'config', '--local', 'core.hooksPath', '.githooks')
+        self.use_stub_install()
+        self.write_config()
+        declined = self.run_helper('setup-windows', answers=['n'])
+        self.assertEqual(declined.returncode, 0, declined.stdout + declined.stderr)
+        self.assertFalse(self.marker.exists())
+        result = self.run_helper('apply-windows', answers=[])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.marker.read_text(encoding='utf-8'))
+        self.assertEqual(record['argv'], ['--config', str(self.clone.resolve() / 'config.local.json'), '--apply'])
+
+    def test_aws_section_is_refused_on_this_path(self):
+        self.write_config(aws={'roles': {'DEV': 'r'}, 'mfa_serial': 'm'})
+        result = self.run_helper('apply-windows', answers=[])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('AWS', result.stderr)
 
 
 if __name__ == '__main__':

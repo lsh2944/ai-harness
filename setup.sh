@@ -1,5 +1,5 @@
 #!/bin/sh
-# ai-harness の初期設定（Mac/Linux 用。Windows は未対応）。
+# ai-harness の初期設定（Mac/Linux 用。Windows は setup.cmd）。
 # clone 直後に ./setup.sh を実行する。再実行しても安全（済んだ段階は飛ばす）。
 #   1) このリポジトリ専用のコミット作成者（--local のみ。グローバル設定は変えない）
 #   2) core.hooksPath=.githooks（コミット前の個人情報検査・pull 後の反映通知）
@@ -26,7 +26,7 @@ done
 
 case $(uname -s 2>/dev/null) in
     MINGW*|MSYS*|CYGWIN*)
-        echo "Windows는 아직 지원하지 않습니다(Mac/Linux 전용). README의 설치 절을 참고해 수동으로 설정하세요." >&2
+        echo "setup.sh는 Mac/Linux용입니다. Windows에서는 PowerShell 또는 cmd 터미널에서 .\\setup.cmd 를 실행하세요." >&2
         exit 1 ;;
 esac
 

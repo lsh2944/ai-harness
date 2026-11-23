@@ -1,5 +1,5 @@
 #!/bin/sh
-# 設置本（~/.claude・~/.codex・~/.agents）への反映を簡単にする（Mac/Linux 用。Windows は未対応）。
+# 設置本（~/.claude・~/.codex・~/.agents）への反映を簡単にする（Mac/Linux 用。Windows は apply.cmd）。
 # 利用者が端末で ./apply.sh を実行する。完全自動の適用はしない:
 #   1) config.local.json の python・aws 節の状態を tools/harness_setup.py で判定
 #   2) install.py の dry-run 要約を表示（変更なしなら終了）
@@ -21,7 +21,7 @@ done
 
 case $(uname -s 2>/dev/null) in
     MINGW*|MSYS*|CYGWIN*)
-        echo "Windows는 아직 지원하지 않습니다(Mac/Linux 전용). README의 설치 절을 참고해 수동으로 실행하세요." >&2
+        echo "apply.sh는 Mac/Linux용입니다. Windows에서는 PowerShell 또는 cmd 터미널에서 .\\apply.cmd 를 실행하세요." >&2
         exit 1 ;;
 esac
 

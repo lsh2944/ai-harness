@@ -437,7 +437,7 @@ def _lexer(seg, punctuation_chars=False):
     lexer = shlex.shlex(seg, posix=True, punctuation_chars=punctuation_chars)
     lexer.whitespace_split = True
     if WINDOWS:
-        # Windows のパス（C:\Users\...）の \ を区切りとして残す（Bash では消えるが、意図したパスで判定する安全側）
+        # Windows のパス（C:\work\a.txt 等）の \ を区切りとして残す（Bash では消えるが、意図したパスで判定する安全側）
         lexer.escape = ""
     return lexer
 
@@ -1080,7 +1080,7 @@ def legacy_write_text(text):
     return bool(WRITE_SIMPLE_RE.search(text) or any(ordered_search(p, text) for p in WRITE_ORDERED))
 # hook 入力に cwd がないとき、相対パスの書き込み対象がこの名前（パス要素単位）を含めば承認対象にする
 FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
-                            "privacy_check.py", "harness_setup.py", "setup.sh", "apply.sh")
+                            "privacy_check.py", "harness_setup.py", "setup.sh", "apply.sh", "setup.cmd", "apply.cmd")
 # cd 先として字句的に確定できる引数（変数・置換・クォート・ワイルドカードを含まない）
 CD_TARGET_RE = re.compile(r"[\w./~+@%,:=\\-]+" if WINDOWS else r"[\w./~+@%,:=-]+")
 # サブシェル・グループ・制御構文の先頭語（直後の cd を検出するため読み飛ばす）
