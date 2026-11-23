@@ -1147,10 +1147,11 @@ class PowerShellTests(unittest.TestCase):
                 self.assertEqual(result[0] if result else None, expected, result)
 
     def test_secret_reads_are_denied(self):
+        if env.WINDOWS:  # \ 区切りは Windows のパスとしてだけ意味を持つ
+            self.check([('Get-Content ~\\.aws\\credentials', 'deny'), ('gc "$HOME\\.codex\\auth.json"', 'deny')])
         self.check([
             ('Get-Content ~/.aws/credentials', 'deny'),
-            ('Get-Content ~\\.aws\\credentials', 'deny'),
-            ('gc "$HOME\\.codex\\auth.json"', 'deny'),
+            ('gc "$HOME/.codex/auth.json"', 'deny'),
             ("Copy-Item -Path '<HOME>/.aws/credentials' -Destination C:/tmp/x", 'deny'),
             ('type <HOME>/.claude/.credentials.json', 'deny'),
             ('Select-String -Path <HOME> -Pattern token -Recurse', 'deny'),

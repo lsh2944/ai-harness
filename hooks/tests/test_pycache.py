@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -158,8 +159,9 @@ class PythonCacheTests(unittest.TestCase):
 
     def test_temp_mixed_and_aws_remain_protected(self):
         command = 'rm -rf /tmp/placeholder ' + str(self.cache)
-        # Windows では絶対パス化でドライブが付く（c:/tmp/placeholder）
-        with patch.object(g, 'is_temp', side_effect=lambda p: p in ('/tmp/placeholder', g.P.abspath('/tmp/placeholder'))):
+        # Windows では絶対パス化で cwd のドライブが付く（c:/tmp/placeholder 等）
+        with patch.object(g, 'is_temp', side_effect=lambda p: p == '/tmp/placeholder'
+                          or (env.WINDOWS and re.fullmatch(r'[a-z]:/tmp/placeholder', p) is not None)):
             self.assertIsNone(g.check_bash(command, cwd=str(self.root)))
         with patch.object(g, 'HOME', str(self.root)):
             aws = self.root / '.aws' / '__pycache__'

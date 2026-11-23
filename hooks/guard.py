@@ -527,10 +527,13 @@ def is_temp(path):
 
 def _secret_roots():
     """字句パスと実体パスの両方で保護対象を判定する（保護パス自体がリンクの場合も含む）"""
-    real_aws = P.realpath(AWS_DIR)
-    roots = [(AWS_DIR, SECRET_FILES)]
-    real_files = tuple(P.realpath(f) for f in SECRET_FILES)
-    if real_aws != AWS_DIR or real_files != SECRET_FILES:
+    aws_dir, secret_files = AWS_DIR, SECRET_FILES
+    if WINDOWS:  # 比較対象のパスは正規形なので、保護パス側も正規形にそろえる
+        aws_dir, secret_files = P.normpath(aws_dir), tuple(P.normpath(f) for f in secret_files)
+    real_aws = P.realpath(aws_dir)
+    roots = [(aws_dir, secret_files)]
+    real_files = tuple(P.realpath(f) for f in secret_files)
+    if real_aws != aws_dir or real_files != secret_files:
         roots.append((real_aws, real_files))
     return roots
 
