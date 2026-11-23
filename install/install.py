@@ -14,11 +14,13 @@ import re
 import shlex
 import sys
 import tempfile
+import time
 import tomllib
 
 HOME = Path.home()
 HARNESS = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+WINDOWS = os.name == 'nt'
 
 # Codex config.toml の所有 hook ブロック（旧版との互換のため同じマーカーを使う）
 BEGIN = '# BEGIN shared harness hooks'
@@ -75,6 +77,27 @@ def default_memory_dir(project_root):
     return str(HOME / '.claude/projects' / re.sub(r'[^A-Za-z0-9]', '-', project_root) / 'memory')
 
 
+def template_path(path):
+    """指示・スキル文中に埋め込むパス。Windows は / 区切りにする（PowerShell・Git Bash・Python のどれでも使え、
+    Markdown 中の \\ のエスケープ問題を避ける）。POSIX はそのまま。"""
+    return path.replace('\\', '/') if WINDOWS and path else path
+
+
+def permission_rule_path(path):
+    """Claude の権限規則（Edit(...)）の絶対パス表記。POSIX は //Users/x/...（従来の "/" + パス）、
+    Windows は //c/Users/x/...（ドライブを先頭要素にした / 区切り）。"""
+    if WINDOWS:
+        drive, rest = os.path.splitdrive(path)
+        return '//' + drive.rstrip(':').lower() + rest.replace('\\', '/')
+    return '/' + path
+
+
+def python_command(python):
+    """スキル文中で .py を実行するコマンドの先頭。POSIX は従来どおり python3、
+    Windows は PowerShell 道具から登録済みインタプリタを呼ぶ形（& "C:/.../python.exe"）。"""
+    return f'& "{template_path(python)}"' if WINDOWS else 'python3'
+
+
 def load_settings(path, with_aws):
     """config.local.json を検証し、テンプレート変数と実行時設定を返す。"""
     # 任意の場所の設定で guard の保護（aws.enabled・project_root・追加保護パス）を弱められないよう、
@@ -90,11 +113,14 @@ def load_settings(path, with_aws):
     if not isinstance(data, dict):
         raise ValueError('config: top level must be an object')
     project = _path(data.get('project_root'), 'project_root')
+    python = _path(data.get('python'), 'python', False) or PYTHON
     variables = {
-        'PROJECT_ROOT': project,
-        'HARNESS_HOME': str(HARNESS),
-        'MEMORY_DIR': _path(data.get('memory_dir'), 'memory_dir', False) or default_memory_dir(project),
-        'PYTHON': _path(data.get('python'), 'python', False) or PYTHON,
+        'PROJECT_ROOT': template_path(project),
+        'HARNESS_HOME': template_path(str(HARNESS)),
+        'HARNESS_HOME_RULE': permission_rule_path(str(HARNESS)),
+        'MEMORY_DIR': template_path(_path(data.get('memory_dir'), 'memory_dir', False) or default_memory_dir(project)),
+        'PYTHON': template_path(python),
+        'PY': python_command(python),
         'RESPONSE_LANGUAGE': _text(data.get('response_language'), 'response_language'),
         'COMMENT_LANGUAGE': _text(data.get('comment_language'), 'comment_language'),
         'AWS_MCP_TOOLS': '',
@@ -116,11 +142,12 @@ def load_settings(path, with_aws):
         if not isinstance(envs, list) or not envs or not all(isinstance(e, str) and ENV_NAME_RE.fullmatch(e) for e in envs):
             raise ValueError('config: aws.assume_role_envs must be a non-empty list of names')
         aws = {'enabled': True, 'profile': profile, 'assume_role_cmd': command, 'assume_role_envs': envs}
-        variables.update(AWS_PROFILE=profile, ASSUME_ROLE_CMD=command, AWS_ENVS=', '.join(envs),
+        variables.update(AWS_PROFILE=profile, ASSUME_ROLE_CMD=template_path(command),
+                         ASSUME_ROLE_CMD_RULE=permission_rule_path(command), AWS_ENVS=', '.join(envs),
                          AWS_MCP_TOOLS=AWS_MCP_TOOLS)
     runtime = {'version': 1, 'project_root': project, 'harness_home': str(HARNESS), 'aws': aws,
                'extra_protected_paths': extra}
-    return {'variables': variables, 'runtime': runtime, 'with_aws': with_aws}
+    return {'variables': variables, 'runtime': runtime, 'with_aws': with_aws, 'python': python}
 
 
 # ---------------- テンプレート ----------------
@@ -192,18 +219,49 @@ def merge(dst, src, label='settings'):
     return dst
 
 
+CLAUDE_GUARD_MATCHER = 'Bash|Write|Edit|NotebookEdit|Read|Grep|mcp__.*'
+# Windows の Claude はシェル道具が PowerShell になり得る。MultiEdit も guard の判定対象（check_edit）
+CLAUDE_GUARD_MATCHER_WINDOWS = 'Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|mcp__.*'
+
+
 def hook(path, codex=False):
     # Codex は hook 定義ごとに trusted_hash を持ち、コマンドが変わると再承認まで黙って実行しない。
     # 承認なしの差し替えはガード停止になるため、Codex は python 直接起動を維持する。
+    if WINDOWS:
+        # /bin/sh がない。python を直接起動し、異常終了は guard.py 自身（excepthook）が拒否を返す。
+        # / 区切りは Git Bash・cmd のどちらで解釈されても同じパスになる
+        command = f'"{template_path(PYTHON)}" "{template_path(str(path))}"'
+        return {'type': 'command', 'command': command + (' --codex' if codex else ''), 'timeout': 10}
     if path.name == 'guard.py' and not codex:
         return {'type': 'command', 'command': f'"/bin/sh" "{path.parent / GUARD_WRAPPER}"', 'timeout': 10}
     return {'type': 'command', 'command': f'"{PYTHON}" "{path}"' + (' --codex' if codex else ''), 'timeout': 10}
 
 
+def _slashed(command):
+    return str(command or '').replace('\\', '/')
+
+
+def stdin_is_terminal():
+    """stdin が利用者の端末か。Windows の isatty() は NUL（AI 道具の stdin）でも True になるため、
+    コンソールのハンドルかを GetConsoleMode で確かめる。"""
+    if not sys.stdin.isatty():
+        return False
+    if not WINDOWS:
+        return True
+    try:
+        fileno = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return True  # ファイル記述子のない置き換え（テストの擬似端末）は isatty() に従う
+    import ctypes
+    import msvcrt
+    mode = ctypes.c_uint32()
+    return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(fileno), ctypes.byref(mode)))
+
+
 def confirm_apply(count):
     """適用は利用者が端末で確認したときだけ行う。AI の非対話実行（stdin が TTY でない）は拒否する。
     環境変数などの迂回スイッチは設けない。"""
-    if not sys.stdin.isatty():
+    if not stdin_is_terminal():
         raise RuntimeError('--apply must be run by the user in an interactive terminal (stdin is not a TTY); nothing was written')
     answer = input(f'{count} file(s) will be written. Type "apply" to continue: ')
     if answer.strip() != 'apply':
@@ -244,11 +302,13 @@ def claude_settings(text, settings, warnings=None):
         raise ValueError('~/.claude/settings.json: "hooks" has an unexpected structure; fix it manually')
     for groups in hooks.values():
         for group in groups:
+            # Windows の既存登録は \ 区切りの場合もあるため / に揃えて所有 hook を判定する
             group['hooks'] = [h for h in group.get('hooks', []) if not any(
-                n in str(h.get('command', '')) for n in ['/hooks/guard.py', '/hooks/usage_alert.py', '/hooks/' + GUARD_WRAPPER])]
+                n in _slashed(h.get('command', '')) for n in ['/hooks/guard.py', '/hooks/usage_alert.py', '/hooks/' + GUARD_WRAPPER])]
         groups[:] = [g for g in groups if g.get('hooks')]
     claude['hooks'].setdefault('PreToolUse', []).append(
-        {'matcher': 'Bash|Write|Edit|NotebookEdit|Read|Grep|mcp__.*', 'hooks': [hook(HOME / '.claude/hooks/guard.py')]})
+        {'matcher': CLAUDE_GUARD_MATCHER_WINDOWS if WINDOWS else CLAUDE_GUARD_MATCHER,
+         'hooks': [hook(HOME / '.claude/hooks/guard.py')]})
     for event in ['PreToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop']:
         group = {'hooks': [hook(HOME / '.claude/hooks/usage_alert.py')]}
         if event == 'PreToolUse':
@@ -312,12 +372,13 @@ def add_values(text, header, values):
 def owned_command(command):
     """生成した hook（python <~/.codex/hooks/guard.py|usage_alert.py> ...）の実行かどうか。コメントや他引数の言及は対象外"""
     try:
-        argv = shlex.split(command) if isinstance(command, str) else []
+        # Windows のパス（\ 区切り）は shlex が \ を消すため、先に / へ揃える
+        argv = shlex.split(_slashed(command)) if isinstance(command, str) else []
     except ValueError:
         return False
     if len(argv) >= 2 and os.path.basename(argv[0]) == 'sh':
         return argv[1].endswith('/.codex/hooks/' + GUARD_WRAPPER)
-    return (len(argv) >= 2 and os.path.basename(argv[0]).startswith('python')
+    return (len(argv) >= 2 and os.path.basename(argv[0]).lower().startswith('python')
             and argv[1].endswith(OWNED_CODEX_HOOKS))
 
 
@@ -485,7 +546,8 @@ def build(settings, target):
         edits[base / RUNTIME_CONFIG] = runtime_json(settings)
         for name in ('guard.py', 'usage_alert.py'):
             edits[base / name] = (HARNESS / 'hooks' / name).read_text(encoding='utf-8')
-        edits[base / GUARD_WRAPPER] = guard_wrapper(base)
+        if not WINDOWS:  # Windows は sh ラッパーを使わない（hook() 参照）
+            edits[base / GUARD_WRAPPER] = guard_wrapper(base)
         instructions = HOME / ('.claude/CLAUDE.md' if runtime == 'claude' else '.codex/AGENTS.md')
         edits[instructions] = insert_block(read(instructions), instructions_block(settings), warnings, str(instructions))
         skills_root = HOME / ('.claude/skills' if runtime == 'claude' else '.agents/skills')
@@ -541,22 +603,39 @@ def atomic(path, content, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.harness-')
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as out:
-            os.fchmod(out.fileno(), mode)
+        # newline='' : Windows でも LF のまま書く（CRLF に変換すると比較・hook スクリプトが壊れる）
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as out:
+            if hasattr(os, 'fchmod'):  # Windows（3.12 まで）にはない。権限ビットも読み取り専用属性しか表さない
+                os.fchmod(out.fileno(), mode)
             out.write(content)
             out.flush()
             os.fsync(out.fileno())
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
 
 
+def replace_with_retry(source, target, attempts=5):
+    """os.replace。Windows では OneDrive・起動中のアプリが一時的に開いていると PermissionError になるため短く再試行する。"""
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if not WINDOWS or attempt == attempts - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
 def check_python(python):
     # guard_hook.sh はこのインタプリタを固定する。消えうる venv・ハーネス配下だと全道具が拒否で固まる。
     path = Path(python)
-    if not path.is_absolute() or not os.access(path, os.X_OK):
+    if not path.is_absolute() or not os.access(path, os.X_OK) or (WINDOWS and not path.is_file()):
         raise RuntimeError(f'Python interpreter is not executable: {python}')
+    if WINDOWS and 'windowsapps' in str(path).lower():
+        # Microsoft Store の python.exe は実行するとストアを開くだけの別名（hook では動かない）
+        raise RuntimeError(f'Use a real Python installation, not the Microsoft Store alias: {python}')
     resolved = path.resolve()
     in_venv = any((p.parent / 'pyvenv.cfg').exists() for p in {path.parent, resolved.parent})
     if python == sys.executable and sys.prefix != sys.base_prefix:
@@ -581,7 +660,7 @@ def main(argv=None):
     global PYTHON
     args = parse_args(argv)
     settings = load_settings(args.config, args.with_aws)
-    PYTHON = settings['variables']['PYTHON']
+    PYTHON = settings['python']
     check_python(PYTHON)
     os.umask(0o077)
     watched = [HOME / p for p in ('.claude/settings.json', '.claude.json', '.codex/config.toml',

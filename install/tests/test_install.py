@@ -5,7 +5,6 @@ import importlib.util
 import io
 import json
 import os
-import pty
 from pathlib import Path
 import re
 import shutil
@@ -15,6 +14,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+try:
+    import pty
+except ImportError:  # Windows
+    pty = None
+
+WINDOWS = os.name == 'nt'
 HARNESS = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('install', HARNESS / 'install/install.py')
 i = importlib.util.module_from_spec(spec)
@@ -23,14 +28,32 @@ spec.loader.exec_module(i)
 BASE_PYTHON = getattr(sys, '_base_executable', None) or sys.executable
 
 
+def symlinks_supported():
+    """シンボリックリンクを作れるか（Windows は開発者モード・管理者権限がないと WinError 1314）。"""
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            (Path(td) / 'link').symlink_to(Path(td))
+            return True
+        except OSError:
+            return False
+
+
+SYMLINKS = symlinks_supported()
+
+
+def home_env(home, **extra):
+    """子プロセスの HOME。Windows の Path.home() は USERPROFILE を読むため両方を仮 HOME にする（実環境へ書かない）。"""
+    return {**os.environ, 'HOME': str(home), 'USERPROFILE': str(home), 'PYTHONIOENCODING': 'utf-8', **extra}
+
+
 def write_config(directory, with_aws=True, **extra):
     """一時ハーネス複製（directory/harness）内に設定を書く（install.py は複製内の設定しか読まない）。"""
-    data = json.loads((HARNESS / 'config.example.json').read_text())
+    data = json.loads((HARNESS / 'config.example.json').read_text(encoding='utf-8'))
     data.update(project_root=str(directory / 'project'), python=BASE_PYTHON, **extra)
     if not with_aws:
         data.pop('aws')
     path = directory / 'harness' / 'config.test.json'
-    path.write_text(json.dumps(data))
+    path.write_text(json.dumps(data), encoding='utf-8')
     return path
 
 
@@ -65,16 +88,30 @@ def snapshot(root):
             for p in sorted(root.rglob('*')) if p.is_file()}
 
 
+# pty がない Windows で「端末から確認文字列を入力した」状態を再現する起動スクリプト（stdin だけを端末扱いにする）
+TTY_SHIM = ('import io, runpy, sys\n'
+            'class Tty(io.StringIO):\n'
+            '    def isatty(self):\n'
+            '        return True\n'
+            'sys.stdin = Tty(sys.stdin.read())\n'
+            'sys.argv = sys.argv[1:]\n'
+            'runpy.run_path(sys.argv[0], run_name="__main__")\n')
+
+
 def run_install(home, *args, tty_answer=None):
-    """一時 HOME で install.py を子プロセス実行する。tty_answer があれば擬似端末を stdin にして確認文字列を送る。"""
-    env = {**os.environ, 'HOME': str(home)}
+    """一時 HOME で install.py を子プロセス実行する。tty_answer があれば擬似端末を stdin にして確認文字列を送る
+    （pty のない Windows は stdin を端末扱いにする起動スクリプトで代用する）。"""
+    env = home_env(home)
     command = [BASE_PYTHON, str(home.parent / 'harness/install/install.py'), *args]
+    run = dict(env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
     if tty_answer is None:
-        return subprocess.run(command, env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        return subprocess.run(command, stdin=subprocess.DEVNULL, **run)
+    if pty is None:
+        return subprocess.run([BASE_PYTHON, '-c', TTY_SHIM, *command[1:]], input=tty_answer + '\n', **run)
     master, slave = pty.openpty()
     try:
         os.write(master, (tty_answer + '\n').encode())
-        return subprocess.run(command, env=env, capture_output=True, text=True, timeout=120, stdin=slave)
+        return subprocess.run(command, stdin=slave, **run)
     finally:
         os.close(slave)
         os.close(master)
@@ -123,6 +160,7 @@ class InstallTests(unittest.TestCase):
         for p, s in initial.items():
             self.assertEqual(p.read_text(), s)
 
+    @unittest.skipIf(WINDOWS, 'Windows は sh ラッパーを使わない（guard.py 自身が異常時に拒否を返す）')
     def test_guard_wrapper_denies_when_interpreter_fails(self):
         # 起動失敗・異常終了は deny JSON、正常判定（無出力・exit 0）はそのまま通す
         hooks = self.root / 'hooks'
@@ -140,7 +178,13 @@ class InstallTests(unittest.TestCase):
     def test_guard_hook_commands_use_wrapper_and_stay_owned(self):
         claude = i.hook(i.HOME/'.claude/hooks/guard.py')['command']
         codex = i.hook(i.HOME/'.codex/hooks/guard.py', True)['command']
-        self.assertEqual(claude, f'"/bin/sh" "{i.HOME}/.claude/hooks/{i.GUARD_WRAPPER}"')
+        if WINDOWS:
+            # sh がないため python 直接起動。パスは / 区切り
+            home = i.template_path(str(i.HOME))
+            self.assertEqual(claude, f'"{i.template_path(i.PYTHON)}" "{home}/.claude/hooks/guard.py"')
+            self.assertNotIn('\\', claude + codex)
+        else:
+            self.assertEqual(claude, f'"/bin/sh" "{i.HOME}/.claude/hooks/{i.GUARD_WRAPPER}"')
         # Codex は trusted_hash 再承認が必要になるため従来形式のまま
         self.assertTrue(codex.endswith('/.codex/hooks/guard.py" --codex'))
         self.assertTrue(i.owned_command(codex))
@@ -148,6 +192,8 @@ class InstallTests(unittest.TestCase):
         # 旧形式（python 直接起動）も所有 hook として置換対象に残す
         self.assertTrue(i.owned_command(f'"/usr/bin/python3" "{i.HOME}/.codex/hooks/guard.py" --codex'))
         self.assertFalse(i.owned_command(f'"/bin/sh" "{i.HOME}/.codex/hooks/other.sh"'))
+        # Windows 形式（\ 区切り・python.exe）の既存登録も所有 hook として扱う
+        self.assertTrue(i.owned_command('"C:\\Python312\\python.exe" "C:\\h\\.codex\\hooks\\guard.py" --codex'))
 
     def fragments(self, with_aws=True):
         settings = self.settings(with_aws)
@@ -247,8 +293,8 @@ class InstallTests(unittest.TestCase):
                 i.load_settings(path, True)  # --with-aws なのに aws 設定がない
             settings = i.load_settings(path, False)
         self.assertEqual(settings['runtime']['aws'], {'enabled': False})
-        self.assertEqual(settings['variables']['MEMORY_DIR'],
-                         str(self.home / '.claude/projects' / re.sub(r'[^A-Za-z0-9]', '-', str(self.root / 'project')) / 'memory'))
+        self.assertEqual(settings['variables']['MEMORY_DIR'], i.template_path(
+            str(self.home / '.claude/projects' / re.sub(r'[^A-Za-z0-9]', '-', str(self.root / 'project')) / 'memory')))
 
     def test_dry_run_writes_nothing_and_lists_changes(self):
         seed_home(self.home)
@@ -265,13 +311,16 @@ class InstallTests(unittest.TestCase):
         entries = [re.match(r'^(\w+)\s+(\S+)', l).groups() for l in result.stdout.splitlines()
                    if l.split(' ', 1)[0] in ('CREATE', 'UPDATE', 'SAME')]
         status = dict((path, state) for state, path in entries)
-        for rel in ('.claude/hooks/harness_config.json', '.claude/hooks/guard.py', '.codex/hooks/guard_hook.sh',
-                    '.claude/skills/cross-check/scripts/co_design.py', '.agents/skills/assume-dev/SKILL.md',
-                    '.claude/agents/architect.md'):
+        created = ['.claude/hooks/harness_config.json', '.claude/hooks/guard.py',
+                   '.claude/skills/cross-check/scripts/co_design.py', '.agents/skills/assume-dev/SKILL.md',
+                   '.claude/agents/architect.md']
+        if not WINDOWS:  # Windows は sh ラッパーを生成しない
+            created.append('.codex/hooks/guard_hook.sh')
+        for rel in created:
             self.assertEqual(status.get(str(self.home / rel)), 'CREATE', rel)
         for rel in ('.claude/settings.json', '.claude.json', '.codex/config.toml', '.claude/CLAUDE.md'):
             self.assertEqual(status.get(str(self.home / rel)), 'UPDATE', rel)
-        self.assertFalse(any('/tests/' in path for _, path in entries))
+        self.assertFalse(any('/tests/' in path.replace('\\', '/') for _, path in entries))
         # hook と設定 sidecar は登録より前
         order = [path for _, path in entries]
         self.assertLess(order.index(str(self.home / '.claude/hooks/harness_config.json')), order.index(str(self.home / '.claude/hooks/guard.py')))
@@ -286,46 +335,52 @@ class InstallTests(unittest.TestCase):
         # 2 回目は変更なし
         second = run_install(self.home, '--config', str(config), '--with-aws')
         self.assertIn('DRY-RUN: 0 file(s) would change', second.stdout)
-        claude = json.loads((self.home / '.claude/settings.json').read_text())
+        claude = json.loads((self.home / '.claude/settings.json').read_text(encoding='utf-8'))
         self.assertEqual(claude['model'], 'keep-me')
         self.assertIn('Bash(user rule)', claude['permissions']['ask'])
-        self.assertIn(f'Edit(/{self.harness}/hooks/**)', claude['permissions']['ask'])
+        self.assertIn(f'Edit({i.permission_rule_path(str(self.harness))}/hooks/**)', claude['permissions']['ask'])
+        if not WINDOWS:
+            self.assertIn(f'Edit(/{self.harness}/hooks/**)', claude['permissions']['ask'])  # 従来の表記のまま
         self.assertEqual(claude['env']['AWS_PROFILE'], 'claude-assumed')
         self.assertIn('/usr/local/bin/user-hook', [h['command'] for g in claude['hooks']['Stop'] for h in g['hooks']])
-        mcp = json.loads((self.home / '.claude.json').read_text())
+        mcp = json.loads((self.home / '.claude.json').read_text(encoding='utf-8'))
         self.assertEqual(mcp['oauthAccount'], {'placeholder': 'dummy'})
         self.assertEqual(mcp['mcpServers']['context7']['args'], ['-y', '@upstash/context7-mcp@4.1.1'])
         self.assertEqual(mcp['mcpServers']['aws-api']['env']['READ_OPERATIONS_ONLY'], 'true')
         self.assertEqual(mcp['mcpServers']['aws-api']['env']['AWS_REGION'], 'us-east-1')
-        text = (self.home / '.claude/CLAUDE.md').read_text()
+        text = (self.home / '.claude/CLAUDE.md').read_text(encoding='utf-8')
         self.assertTrue(text.startswith('# My rules\n\n- keep this line\n'))
         self.assertEqual(text.count(i.MD_BEGIN), 1)
         self.assertIn('**Korean**', text)
         self.assertIn('claude-assumed', text)
-        self.assertIn('**Korean**', (self.home / '.codex/AGENTS.md').read_text())
+        self.assertIn('**Korean**', (self.home / '.codex/AGENTS.md').read_text(encoding='utf-8'))
         # 生成物に未解決の変数が残らない、guard の設定が読める
         for path in self.home.rglob('*'):
             if path.is_file() and path.suffix in ('.md', '.yaml', '.json'):
-                self.assertNotIn('{{', path.read_text(), path)
+                self.assertNotIn('{{', path.read_text(encoding='utf-8'), path)
         for runtime in ('.claude', '.codex'):
             loader = importlib.util.spec_from_file_location('g' + runtime[1:], self.home / runtime / 'hooks/guard.py')
             guard = importlib.util.module_from_spec(loader)
             loader.loader.exec_module(guard)
             self.assertIsNone(guard.CONFIG_ERROR)
             self.assertEqual(guard.ALLOWED_PROFILE, 'claude-assumed')
-            self.assertEqual(guard.PROJECT, str(self.root / 'project'))
-        # 生成した hook・設定 sidecar は所有者のみ読み書き可能
-        for path in (self.home / '.claude/hooks').iterdir():
-            if path.is_file():
-                self.assertEqual(path.stat().st_mode & 0o077, 0, path)
-        # guard ラッパー経由で実際に判定できる（設定 sidecar が有効）
-        result = subprocess.run(['/bin/sh', str(self.home / '.claude/hooks/guard_hook.sh')],
+            self.assertEqual(guard.PROJECT, guard.P.normpath(str(self.root / 'project')))
+        # 生成した hook・設定 sidecar は所有者のみ読み書き可能（Windows の権限ビットは読み取り専用属性のみ）
+        if not WINDOWS:
+            for path in (self.home / '.claude/hooks').iterdir():
+                if path.is_file():
+                    self.assertEqual(path.stat().st_mode & 0o077, 0, path)
+        # 登録した hook コマンド経由で実際に判定できる（設定 sidecar が有効）
+        if WINDOWS:
+            command = [BASE_PYTHON, str(self.home / '.claude/hooks/guard.py')]
+        else:
+            command = ['/bin/sh', str(self.home / '.claude/hooks/guard_hook.sh')]
+        result = subprocess.run(command,
                                 input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'aws s3 rb s3://x'}}),
-                                capture_output=True, text=True, env={**os.environ, 'HOME': str(self.home)}, timeout=30)
+                                capture_output=True, text=True, encoding='utf-8', env=home_env(self.home), timeout=30)
         self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
-        result = subprocess.run(['/bin/sh', str(self.home / '.claude/hooks/guard_hook.sh')],
-                                input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}),
-                                capture_output=True, text=True, env={**os.environ, 'HOME': str(self.home)}, timeout=30)
+        result = subprocess.run(command, input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}),
+                                capture_output=True, text=True, encoding='utf-8', env=home_env(self.home), timeout=30)
         self.assertEqual(result.stdout.strip(), '')
 
     def test_without_aws_omits_aws_module(self):
@@ -334,12 +389,12 @@ class InstallTests(unittest.TestCase):
         result = run_install(self.home, '--config', str(config), '--apply', tty_answer='apply')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.home / '.claude/skills/assume-dev').exists())
-        agent = (self.home / '.claude/agents/code-reviewer.md').read_text()
+        agent = (self.home / '.claude/agents/code-reviewer.md').read_text(encoding='utf-8')
         self.assertNotIn('aws-api', agent)
         self.assertNotIn('<!--', agent)
-        runtime = json.loads((self.home / '.claude/hooks/harness_config.json').read_text())
+        runtime = json.loads((self.home / '.claude/hooks/harness_config.json').read_text(encoding='utf-8'))
         self.assertEqual(runtime['aws'], {'enabled': False})
-        self.assertNotIn('AWS_PROFILE', json.loads((self.home / '.claude/settings.json').read_text())['env'])
+        self.assertNotIn('AWS_PROFILE', json.loads((self.home / '.claude/settings.json').read_text(encoding='utf-8'))['env'])
 
     def test_config_must_live_inside_harness(self):
         # リポジトリ外の設定・外を指すリンク・省略形オプションでは何も書かない
@@ -348,9 +403,12 @@ class InstallTests(unittest.TestCase):
         inside = write_config(self.root)
         outside = self.root / 'outside.json'
         outside.write_text(inside.read_text())
-        link = self.harness / 'link.json'
-        link.symlink_to(outside)
-        for config in (outside, link, self.root / 'harness/missing.json'):
+        configs = [outside, self.root / 'harness/missing.json']
+        if SYMLINKS:  # リンクを作れない環境（Windows の権限不足）ではリンク経由の確認を省く
+            link = self.harness / 'link.json'
+            link.symlink_to(outside)
+            configs.append(link)
+        for config in configs:
             with self.subTest(config=config):
                 result = run_install(self.home, '--config', str(config), '--apply')
                 self.assertEqual(result.returncode, 1, result.stdout)
@@ -371,7 +429,7 @@ class InstallTests(unittest.TestCase):
         warnings = []
         merged = json.loads(i.claude_settings(json.dumps(existing), self.settings(), warnings))
         # 保護用の強制キー（--with-aws の AWS_PROFILE）だけは上書きし、それ以外の既存スカラーは保持する
-        self.assertEqual(merged['env'], {'BASH_MAX_OUTPUT_LENGTH': '30000', 'AWS_PROFILE': 'claude-assumed'})
+        self.assertEqual(merged['env'], {'BASH_MAX_OUTPUT_LENGTH': '30000', 'AWS_PROFILE': 'claude-assumed', 'PYTHONUTF8': '1'})
         self.assertEqual(len(warnings), 1)
         self.assertIn('env.AWS_PROFILE will be overwritten', warnings[0])
         self.assertNotIn('user-choice', warnings[0])  # 既存値は出力しない
@@ -432,7 +490,7 @@ class InstallTests(unittest.TestCase):
                 self.assertIn('confirmation did not match', result.stderr)
                 self.assertEqual(snapshot(self.home), before)
         # 迂回用の環境変数などは存在しない（非 TTY では常に拒否）
-        env = {**os.environ, 'HOME': str(self.home), 'AI_HARNESS_APPLY': '1', 'CI': '1'}
+        env = home_env(self.home, AI_HARNESS_APPLY='1', CI='1')
         result = subprocess.run([BASE_PYTHON, str(self.harness / 'install/install.py'), '--config', str(config), '--apply'],
                                 env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 1)
@@ -456,7 +514,10 @@ class InstallTests(unittest.TestCase):
         (venv / 'bin').mkdir(parents=True)
         (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
         python = venv / 'bin/python3'
-        python.symlink_to(BASE_PYTHON)
+        if SYMLINKS:
+            python.symlink_to(BASE_PYTHON)
+        else:  # リンクを作れない環境では実行ファイルの複製で venv 配置を模す
+            shutil.copyfile(BASE_PYTHON, python)
         with self.assertRaises(RuntimeError):
             i.check_python(str(python))
         with self.assertRaises(RuntimeError):

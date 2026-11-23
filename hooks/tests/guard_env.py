@@ -45,7 +45,8 @@ CONFIG.write_text(json.dumps(config()))
 # Windows の expanduser・Path.home() は USERPROFILE を読むため、実際のプロファイルに触れないよう両方を置き換える。
 os.environ['HOME'] = str(HOME)
 os.environ['USERPROFILE'] = str(HOME)
-ENV = dict(os.environ)
+# 子プロセス（テスト用の起動スクリプトを含む）の入出力・ソース読み込みを UTF-8 にする（Windows の既定は cp932 等）
+ENV = dict(os.environ, PYTHONUTF8='1')
 
 
 def _symlinks_supported():

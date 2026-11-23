@@ -24,7 +24,7 @@ def fill(text):
 
 def run_guard(payload, runtime='claude', guard=None, environ=None):
     return subprocess.run([sys.executable, str(guard or env.GUARD)] + (['--codex'] if runtime == 'codex' else []),
-                          input=fill(payload), capture_output=True, text=True, env=environ or env.ENV)
+                          input=fill(payload), capture_output=True, text=True, encoding='utf-8', env=environ or env.ENV)
 
 
 g = env.load()
@@ -299,7 +299,7 @@ class GuardTests(unittest.TestCase):
                                  f'src=open({str(env.GUARD)!r}).read().replace("GUARD_SECONDS = 8","GUARD_SECONDS = 1")'
                                  '.replace("    tool = data.get(\\"tool_name\\", \\"\\")","    time.sleep(3); tool = data.get(\\"tool_name\\", \\"\\")");'
                                  'exec(compile(src,"guard.py","exec"),{"__name__":"__main__","__file__":' + repr(str(env.GUARD)) + '})'],
-                                input='{}', capture_output=True, text=True, timeout=10, env=env.ENV)
+                                input='{}', capture_output=True, text=True, encoding='utf-8', timeout=10, env=env.ENV)
         output = json.loads(result.stdout)['hookSpecificOutput']
         self.assertEqual(output['permissionDecision'], 'deny')
         # json.load の except ではなく、最上位の期限切れ経路で拒否したこと
@@ -1228,10 +1228,17 @@ class PowerShellTests(unittest.TestCase):
         ])
 
     def test_dispatch_through_main(self):
-        # 子プロセスの main() が PowerShell 道具を判定し、韓国語の理由を含む JSON を返す
-        result = run_guard(json.dumps({'tool_name': 'PowerShell', 'tool_input': {'command': 'Get-Content ~/.aws/credentials'}}))
+        # 子プロセスの main() が PowerShell 道具を判定し、韓国語の理由を含む JSON を返す。
+        # 実際の hook と同じく UTF-8 モードなし（Windows の既定コードページ）でも出力できること
+        plain = {k: v for k, v in env.ENV.items() if k not in ('PYTHONUTF8', 'PYTHONIOENCODING')}
+        result = run_guard(json.dumps({'tool_name': 'PowerShell', 'tool_input': {'command': 'Get-Content ~/.aws/credentials'}}),
+                           environ=plain)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        path = env.HOME.as_posix() + '/한글 폴더/a.txt'  # JSON に \ をそのまま埋め込まない
+        result = run_guard(json.dumps({'tool_name': 'Read', 'tool_input': {'file_path': path}}, ensure_ascii=False),
+                           environ=plain)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, ''), result.stderr)
         result = run_guard(json.dumps({'tool_name': 'PowerShell', 'tool_input': {'command': 'Get-ChildItem'}}))
         self.assertEqual((result.returncode, result.stdout.strip()), (0, ''))
 

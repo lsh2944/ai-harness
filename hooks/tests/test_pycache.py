@@ -197,7 +197,7 @@ class PythonCacheTests(unittest.TestCase):
     def invoke_patch(self, operation, target, runtime):
         payload = {'tool_name': 'apply_patch', 'tool_input': {'command': f'*** {operation}: {target}\n'}, 'cwd': str(self.root)}
         result = subprocess.run([sys.executable, '-B', str(ROOT / 'guard.py')] + (['--codex'] if runtime == 'codex' else []),
-                                input=json.dumps(payload), text=True, capture_output=True, timeout=5, env=env.ENV)
+                                input=json.dumps(payload), text=True, encoding='utf-8', capture_output=True, timeout=5, env=env.ENV)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
 
@@ -220,7 +220,7 @@ class PythonCacheTests(unittest.TestCase):
                 payload = {'tool_name': 'apply_patch', 'tool_input': {'command': f'*** {operation}: {target}\n'}, 'cwd': str(self.root)}
                 result = subprocess.run([sys.executable, '-B', '-c', code, str(ROOT / 'guard.py'), str(self.root)] +
                                         (['--codex'] if runtime == 'codex' else []), input=json.dumps(payload), text=True,
-                                        capture_output=True, timeout=5, env=env.ENV)
+                                        encoding='utf-8', capture_output=True, timeout=5, env=env.ENV)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 decision = json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
                 self.assertEqual(decision, 'deny' if runtime == 'codex' and expected == 'ask' else expected)

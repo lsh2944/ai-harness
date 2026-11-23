@@ -32,7 +32,8 @@ def _crash_deny(*_args):
         _os._exit(0)
 
 
-sys.excepthook = _crash_deny
+if __name__ == "__main__":  # テスト等で読み込んだときは呼び出し元の例外処理を変えない
+    sys.excepthook = _crash_deny
 
 import glob  # noqa: E402
 import os  # noqa: E402

@@ -4,7 +4,7 @@
   },
   "permissions": {
     "ask": [
-      "Edit(/{{ASSUME_ROLE_CMD}})"
+      "Edit({{ASSUME_ROLE_CMD_RULE}})"
     ]
   }
 }

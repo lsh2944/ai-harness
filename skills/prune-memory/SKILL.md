@@ -68,7 +68,7 @@ Claude가 정리 담당, Codex가 읽기 전용 검증 담당이다. Codex에서
 1. Claude 자체 대조가 끝난 뒤, 통합이 있으면 대상 memory 폴더 밖의 임시 위치에 매핑 파일을 쓴다.
    내용은 통합 원본 파일명→결과 파일명과 보존 중인 원본만 적는다. 변경 파일 목록은 스크립트가 만든다.
    Claude의 자기평가·예상 정답·이전 대화는 넣지 않는다.
-2. `python3 {{SKILL_DIR}}/scripts/codex_verify.py --memory <대상> --backup <이번 백업> [--mapping <매핑>]`
+2. `{{PY}} "{{SKILL_DIR}}/scripts/codex_verify.py" --memory <대상> --backup <이번 백업> [--mapping <매핑>]`
    를 실행한다. 스크립트는 다음을 수행하고 결과·stderr·이벤트를 보존한다.
    - 백업과 해시 비교로 변경·추가·삭제 목록 생성(변경 없으면 `NO_CHANGES`로 종료).
    - 기계적 검사: 전체 링크 유효성, frontmatter name=파일명, 전 파일 인덱스 포함. 실패 시 Codex 없이 `FAIL`.

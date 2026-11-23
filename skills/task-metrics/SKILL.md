@@ -12,7 +12,7 @@ Claude·Codex가 같은 결정적 CLI를 사용한다. 별도 AI 호출·훅·�
 프로젝트 지침이 지정한 의미 있는 작업 완료 시 **메인만 1건** 기록한다. 짧은 질의/사소한 편집은 생략한다. 교차검증은 생성된 summary를 실행별로 한 번 가져온다. 기존 검증 호출과 함께 실행할 수 있고 기록 때문에 테스트/리뷰를 반복하지 않는다.
 
 ```bash
-python3 {{HARNESS_HOME}}/tools/task_metrics/task_metrics.py record --task feature-example --run codex-main-001 --provider codex --workflow single --kind feature --verification passed
+{{PY}} "{{HARNESS_HOME}}/tools/task_metrics/task_metrics.py" record --task feature-example --run codex-main-001 --provider codex --workflow single --kind feature --verification passed
 ```
 
 - task: 비교할 작업의 비밀정보 없는 짧은 식별자. 같은 작업의 Claude/Codex는 공유한다. run: provider 내에서 고유한 실행 ID(예: 날짜+작업+주 실행/교차검토 순번). 중복 오류는 새 ID로 우회하지 말고 기존 기록을 확인한다.
@@ -24,7 +24,7 @@ python3 {{HARNESS_HOME}}/tools/task_metrics/task_metrics.py record --task featur
 교차검증의 **기존 summary.json만** 가져오기:
 
 ```bash
-python3 {{HARNESS_HOME}}/tools/task_metrics/task_metrics.py record --task feature-example --run codex-cross-001 --provider codex --workflow test-plan --kind feature --cross-check-summary /absolute/temp/cross-check-run/summary.json
+{{PY}} "{{HARNESS_HOME}}/tools/task_metrics/task_metrics.py" record --task feature-example --run codex-cross-001 --provider codex --workflow test-plan --kind feature --cross-check-summary /absolute/temp/cross-check-run/summary.json
 ```
 
 workflow는 summary.mode와 맞춘다. debate는 Codex 호출마다(`debate-<phase>` summary) `--workflow debate --cross-check-summary <summary.json>`으로 한 번씩 기록하며, 경로는 `finalize`·`reveal` 출력의 `call_summaries`에 있다. raw token/elapsed 인자와 summary 가져오기를 함께 쓰지 않는다. summary에 담긴 해당 Codex 호출만 측정하며 Claude 주 세션 사용량은 별도 관측이다. `execution_status`에는 summary의 COMPLETE/INCOMPLETE를 보존해 따로 집계하며 테스트 `verification`과 구분한다. 일반 기록의 실행 상태는 null이다.
@@ -32,7 +32,7 @@ workflow는 summary.mode와 맞춘다. debate는 Codex 호출마다(`debate-<pha
 ## 집계·해석
 
 ```bash
-python3 {{HARNESS_HOME}}/tools/task_metrics/task_metrics.py summary
+{{PY}} "{{HARNESS_HOME}}/tools/task_metrics/task_metrics.py" summary
 ```
 
 한 작업만 볼 때는 `summary --task <ID>`를 사용한다.

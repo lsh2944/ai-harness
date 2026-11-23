@@ -1,6 +1,7 @@
 {
   "env": {
-    "BASH_MAX_OUTPUT_LENGTH": "15000"
+    "BASH_MAX_OUTPUT_LENGTH": "15000",
+    "PYTHONUTF8": "1"
   },
   "bashOutputMaxChars": 15000,
   "permissions": {
@@ -18,11 +19,11 @@
       "Edit(~/.claude/settings.json)",
       "Edit(~/.claude/hooks/**)",
       "Edit(~/.claude.json)",
-      "Edit(/{{HARNESS_HOME}}/hooks/**)",
-      "Edit(/{{HARNESS_HOME}}/install/**)",
-      "Edit(/{{HARNESS_HOME}}/settings/**)",
-      "Edit(/{{HARNESS_HOME}}/tools/aws/**)",
-      "Edit(/{{HARNESS_HOME}}/config.local.json)"
+      "Edit({{HARNESS_HOME_RULE}}/hooks/**)",
+      "Edit({{HARNESS_HOME_RULE}}/install/**)",
+      "Edit({{HARNESS_HOME_RULE}}/settings/**)",
+      "Edit({{HARNESS_HOME_RULE}}/tools/aws/**)",
+      "Edit({{HARNESS_HOME_RULE}}/config.local.json)"
     ],
     "defaultMode": "auto",
     "disableBypassPermissionsMode": "disable"
