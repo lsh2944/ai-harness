@@ -42,8 +42,37 @@ def config(aws=True, **extra):
 
 CONFIG.write_text(json.dumps(config()))
 # guard は `~` を呼び出し時の HOME で展開するため、このテストプロセス全体を仮 HOME にする（子プロセスにも渡す）。
+# Windows の expanduser・Path.home() は USERPROFILE を読むため、実際のプロファイルに触れないよう両方を置き換える。
 os.environ['HOME'] = str(HOME)
+os.environ['USERPROFILE'] = str(HOME)
 ENV = dict(os.environ)
+
+
+def _symlinks_supported():
+    """シンボリックリンクを作れるか（Windows は開発者モード・管理者権限がないと WinError 1314）。"""
+    target = _root / 'symlink-probe-target'
+    target.write_text('x')
+    try:
+        (_root / 'symlink-probe').symlink_to(target)
+        return True
+    except OSError:
+        return False
+
+
+SYMLINKS = _symlinks_supported()
+WINDOWS = os.name == 'nt'
+
+
+def requires_symlinks(test):
+    """シンボリックリンクを作れない環境ではスキップする（POSIX では常に実行）。"""
+    import unittest
+    return unittest.skipUnless(SYMLINKS, 'シンボリックリンクを作成できない環境（Windows の権限不足）')(test)
+
+
+def posix_only(reason):
+    """POSIX 固有のパス・ファイル名を前提にする検証。"""
+    import unittest
+    return unittest.skipIf(WINDOWS, reason)
 
 
 def load(path=GUARD, name='guard'):

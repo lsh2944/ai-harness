@@ -80,6 +80,7 @@ class PythonCacheTests(unittest.TestCase):
         self.assertFalse(g.is_python_cache(str(self.cache)))
         self.command('rm -rf __pycache__', 'ask')
 
+    @env.requires_symlinks
     def test_symlink_files_directories_parents_and_dotdot(self):
         link = self.cache / 'link.pyc'
         link.symlink_to(self.normal)
@@ -110,6 +111,7 @@ class PythonCacheTests(unittest.TestCase):
                         'cd - && rm -rf __pycache__', 'cd nested/.. && rm -rf __pycache__'):
             self.command(command, 'ask')
 
+    @env.posix_only('Windows はファイル名に改行・CR を使えない')
     def test_normal_n_names_and_control_characters(self):
         name = self.root / 'normal-name' / '__pycache__'
         name.mkdir(parents=True)
@@ -131,8 +133,9 @@ class PythonCacheTests(unittest.TestCase):
         (other / '__pycache__').mkdir()
         self.command(self.find(shlex.quote(str(self.root)) + ' ' + shlex.quote(str(other))))
         self.command('cd other && ' + self.find('.'))
-        (self.root / 'escape').symlink_to('/Users', target_is_directory=True)
-        self.command(self.find())
+        if env.SYMLINKS:
+            (self.root / 'escape').symlink_to('/Users', target_is_directory=True)
+            self.command(self.find())
 
     def test_find_rejects_follow_extra_actions_and_data(self):
         for command in (self.find(extra='-exec rm -rf data.txt +'), self.find(extra='-delete'),
@@ -155,7 +158,8 @@ class PythonCacheTests(unittest.TestCase):
 
     def test_temp_mixed_and_aws_remain_protected(self):
         command = 'rm -rf /tmp/placeholder ' + str(self.cache)
-        with patch.object(g, 'is_temp', side_effect=lambda p: p == '/tmp/placeholder'):
+        # Windows では絶対パス化でドライブが付く（c:/tmp/placeholder）
+        with patch.object(g, 'is_temp', side_effect=lambda p: p in ('/tmp/placeholder', g.P.abspath('/tmp/placeholder'))):
             self.assertIsNone(g.check_bash(command, cwd=str(self.root)))
         with patch.object(g, 'HOME', str(self.root)):
             aws = self.root / '.aws' / '__pycache__'
@@ -173,13 +177,19 @@ class PythonCacheTests(unittest.TestCase):
         with patch.object(g, 'HOME', str(home)):
             for path in (aws, pyc):
                 self.assertFalse(g.is_python_cache(str(path)))
-                self.assertFalse(g.is_python_cache('/' + str(path)))
+                if not env.WINDOWS:  # 先頭 // は POSIX 固有の書き方
+                    self.assertFalse(g.is_python_cache('/' + str(path)))
             for root in (home, self.root):
-                self.assertFalse(g.find_python_cache(shlex.split(self.find(str(root))), str(self.root)))
-                self.command(self.find(str(root)), 'ask')
-            self.command(self.find('/' + str(home)), 'ask')
+                self.assertFalse(g.find_python_cache(g.tokens(self.find(shlex.quote(str(root)))), str(self.root)))
+                self.command(self.find(shlex.quote(str(root))), 'ask')
+            if not env.WINDOWS:
+                self.command(self.find('/' + str(home)), 'ask')
+        if env.WINDOWS:
+            return
         # 保護対象以外では先頭 slash 正規化によってリンク確認が失われない。
         self.assertTrue(g.is_python_cache('/' + str(self.cache)))
+        if not env.SYMLINKS:
+            return
         alias = self.root / 'double-slash-link'
         alias.symlink_to(self.root, target_is_directory=True)
         self.assertFalse(g.is_python_cache('/' + str(alias / '__pycache__')))

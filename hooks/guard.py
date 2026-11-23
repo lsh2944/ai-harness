@@ -10,18 +10,114 @@ Claude 経由の操作だけを制限する（ユーザー自身のターミナ�
 
 設定は同じディレクトリの harness_config.json（install.py が生成）から読む。
 欠落・破損・不正値の場合は全操作を拒否する（fail-closed）。
-"""
-import glob
-import json
-import os
-import re
-import shlex
-import signal
-import sys
-import stat
-import time
 
-HOME = os.path.expanduser("~")
+Windows では PowerShell 道具も判定し（check_powershell）、パスは判定用の正規形
+（区切り /・小文字・Git Bash の /c/... はドライブ形式）に揃えて POSIX と同じ判定を使う。
+"""
+import json
+import sys
+
+
+def _crash_deny(*_args):
+    """捕捉されない例外（読み込み時を含む）は拒否として出力する。
+    Claude は exit 1 を非ブロッキングのエラーとして扱い未判定で実行するため、異常終了させない。"""
+    try:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            # 出力の文字コードが未設定（cp932 等）でも失敗しないよう ASCII でエスケープする
+            "permissionDecisionReason": "가드 검사에 실패했습니다. 보호 규칙을 확인하세요."}}))
+        sys.stdout.flush()
+    finally:
+        import os as _os
+        _os._exit(0)
+
+
+sys.excepthook = _crash_deny
+
+import glob  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import shlex  # noqa: E402
+import signal  # noqa: E402
+import stat  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+WINDOWS = os.name == "nt"
+
+if WINDOWS:
+    import ntpath
+
+    _MSYS_DRIVE_RE = re.compile(r"^/([A-Za-z])(?=/|$)")
+
+    def _win_input(value):
+        """Git Bash 形式（/c/...）のドライブを Windows 形式（c:/...）にする。"""
+        return _MSYS_DRIVE_RE.sub(lambda m: m.group(1) + ":", str(value).replace("\\", "/"))
+
+    def _win_canon(value):
+        """判定用の正規形: 区切りは /、大文字小文字は区別しない（小文字）。"""
+        return _win_input(value).replace("\\", "/").lower()
+
+    class _WinPath:
+        """os.path の代わりに使う Windows 用の薄いラッパー。結果はすべて正規形にする。
+        POSIX では P = os.path そのもので、従来の動作を変えない。"""
+        sep = "/"
+
+        def __getattr__(self, name):
+            return getattr(ntpath, name)
+
+        def normpath(self, p):
+            return _win_canon(ntpath.normpath(_win_input(p)))
+
+        def abspath(self, p):
+            return _win_canon(ntpath.abspath(_win_input(p)))
+
+        def realpath(self, p):
+            return _win_canon(ntpath.realpath(_win_input(p)))
+
+        def join(self, *parts):
+            return _win_canon(ntpath.join(*(_win_input(p) for p in parts)))
+
+        def expanduser(self, p):
+            return _win_canon(ntpath.expanduser(_win_input(p)))
+
+        def expandvars(self, p):
+            return _win_canon(ntpath.expandvars(_win_input(p)))
+
+        def basename(self, p):
+            return _win_canon(ntpath.basename(_win_input(p)))
+
+        def dirname(self, p):
+            return _win_canon(ntpath.dirname(_win_input(p)))
+
+        def split(self, p):
+            head, tail = ntpath.split(_win_input(p))
+            return _win_canon(head), _win_canon(tail)
+
+        def isabs(self, p):
+            s = _win_input(p)
+            # Python 3.13 以降の ntpath.isabs は /tmp 等のドライブなしを相対とするが、判定上は絶対パスとして扱う
+            return ntpath.isabs(s) or s.startswith("/")
+
+    P = _WinPath()
+    _PATH_SPLIT_RE = re.compile(r"[\\/]")
+else:
+    P = os.path
+    _PATH_SPLIT_RE = re.compile("/")
+
+
+def _has_dotdot(path):
+    """パス要素に .. を含むか（Windows では \\ も区切りとみなす）。"""
+    return ".." in _PATH_SPLIT_RE.split(path)
+
+
+def _norm_text(text):
+    """コマンド文字列中の保護語を探すための正規化（Windows のみ区切りと大文字小文字を揃える）。"""
+    return text.replace("\\", "/").lower() if WINDOWS else text
+
+
+HOME = P.normpath(P.expanduser("~")) if WINDOWS else P.expanduser("~")
 RUNTIME = "codex" if "--codex" in sys.argv else "claude"
 # Codex 起動側（cross_check.py の TOOL_POLICY_ENV と同名）が渡す道具方針。hook matcher 対象の道具について
 # none=全拒否、read=Bash・Read のみ検査付きで許可（matcher 外の道具は起動側の実行監視が止める）
@@ -29,7 +125,7 @@ TOOL_POLICY_ENV = "HARNESS_CODEX_TOOL_POLICY"
 # hook の timeout（10 秒）超過は未判定のまま実行されるため、その前に拒否する
 GUARD_SECONDS = 8
 CONFIG_NAME = "harness_config.json"
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_NAME)
+CONFIG_PATH = P.join(P.dirname(P.abspath(__file__)), CONFIG_NAME)
 PROFILE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,128}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
@@ -39,9 +135,9 @@ class ConfigError(ValueError):
 
 
 def _abs_path(value, name):
-    if not isinstance(value, str) or not os.path.isabs(value) or any(c in value for c in "\n\r\0"):
+    if not isinstance(value, str) or not P.isabs(value) or any(c in value for c in "\n\r\0"):
         raise ConfigError(f"{name} は絶対パスの文字列が必要")
-    return os.path.normpath(value)
+    return P.normpath(value)
 
 
 def load_config(path=CONFIG_PATH):
@@ -100,22 +196,22 @@ TEMP_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folder
 
 def _protected_write():
     """改変時に承認を求める保護パスと、コマンド文字列中の保護語。"""
-    paths = [os.path.join(HOME, rel) for rel in (
+    paths = [P.join(HOME, rel) for rel in (
         ".claude/settings.json", ".claude/hooks/", ".claude.json", ".aws/", ".codex/config.toml", ".codex/hooks/")]
     words = [".claude/settings", ".claude/hooks", ".claude.json", ".aws/", ".codex/config", ".codex/hooks", CONFIG_NAME]
     if HARNESS_HOME:
-        name = os.path.basename(HARNESS_HOME)
+        name = P.basename(HARNESS_HOME)
         # ハーネス本体（hook・インストーラ・設定断片・default 認証で動く認証更新スクリプト）と利用者設定
         for sub in ("hooks", "install", "settings", "tools/aws"):
-            paths.append(os.path.join(HARNESS_HOME, sub) + "/")
+            paths.append(P.join(HARNESS_HOME, sub) + "/")
             words.append(f"{name}/{sub}")
-        paths.append(os.path.join(HARNESS_HOME, "config.local.json"))
+        paths.append(P.join(HARNESS_HOME, "config.local.json"))
         words.append("config.local.json")
     if PROJECT:
-        paths.append(os.path.join(PROJECT, ".claude/settings"))
+        paths.append(P.join(PROJECT, ".claude/settings"))
     if ASSUME_ROLE_CMD:
         paths.append(ASSUME_ROLE_CMD)
-        words.append(os.path.basename(ASSUME_ROLE_CMD))
+        words.append(P.basename(ASSUME_ROLE_CMD))
     for extra in (CONFIG or {}).get("extra_protected_paths", []):
         paths.append(extra)
         words.append(extra)
@@ -135,8 +231,8 @@ def _protected_entries():
     if key not in _PROTECTED_ENTRIES_CACHE:
         entries = []
         for prot in key:
-            base = os.path.normpath(prot)
-            for b in dict.fromkeys((base, os.path.realpath(base))):
+            base = P.normpath(prot)
+            for b in dict.fromkeys((base, P.realpath(base))):
                 entries.append((b, prot.endswith("/")))
         _PROTECTED_ENTRIES_CACHE[key] = tuple(entries)
     return _PROTECTED_ENTRIES_CACHE[key]
@@ -151,13 +247,14 @@ def is_protected_write(path):
     return bool(re.search(r"/\.claude/settings[^/]*$", path))
 
 # 読み取り禁止の秘密情報。~/.aws は許可リスト方式（config と MCP ログ以外は不可）。
-AWS_DIR = os.path.join(HOME, ".aws")
-AWS_READABLE_FILES = (os.path.join(AWS_DIR, "config"),)
-AWS_READABLE_DIRS = (os.path.join(AWS_DIR, "aws-api-mcp"),)
-SECRET_FILES = (os.path.join(HOME, ".codex/auth.json"), os.path.join(HOME, ".claude/.credentials.json"))
+AWS_DIR = P.join(HOME, ".aws")
+AWS_READABLE_FILES = (P.join(AWS_DIR, "config"),)
+AWS_READABLE_DIRS = (P.join(AWS_DIR, "aws-api-mcp"),)
+SECRET_FILES = (P.join(HOME, ".codex/auth.json"), P.join(HOME, ".claude/.credentials.json"))
 # 文字列中（python -c 等）に現れる秘密情報パスの補助検出
-SECRET_WORDS = re.compile(r"\.aws/(credentials|\.credentials|cli/cache|sso/cache|login/cache)"
-                          r"|\.codex/auth\.json|\.claude/\.credentials")
+_SEP_RE = r"[\\/]+" if WINDOWS else "/"  # Windows は \ 区切り（JSON の \\ を含む）と大文字小文字の違いも検出する
+SECRET_WORDS = re.compile(rf"\.aws{_SEP_RE}(credentials|\.credentials|cli{_SEP_RE}cache|sso{_SEP_RE}cache|login{_SEP_RE}cache)"
+                          rf"|\.codex{_SEP_RE}auth\.json|\.claude{_SEP_RE}\.credentials", re.I if WINDOWS else 0)
 
 # 後続コマンドを実行するラッパー: (値を取るオプション, オプション後に読み飛ばす位置引数の数)
 WRAPPERS = {
@@ -300,9 +397,25 @@ def ordered_search(pattern, text):
     return None
 
 
+_OUT_LOCK = threading.Lock()  # Windows の期限切れスレッドと判定結果の出力が重ならないようにする
+_TIMER = None
+
+
+def _stop_timer():
+    """期限切れタイマーを止める。POSIX は SIGALRM、Windows（SIGALRM なし）はスレッドのタイマー。"""
+    if hasattr(signal, "alarm"):
+        signal.alarm(0)
+    elif _TIMER is not None:
+        _TIMER.cancel()
+
+
 def out(decision, reason):
     # 出力途中の期限切れで JSON が二重にならないよう、判定確定時点でタイマーを止める。
-    signal.alarm(0)
+    _stop_timer()
+    if _TIMER is not None and not _OUT_LOCK.acquire(blocking=False):
+        # 期限切れの拒否を出力中（Windows のタイマースレッド）。そちらが終了させる
+        time.sleep(GUARD_SECONDS)
+        os._exit(0)
     # Codex は ask をサポートしない。失敗扱いで実行されることを防ぐ。
     if RUNTIME == "codex" and decision == "ask":
         decision = "deny"
@@ -319,9 +432,23 @@ def split_segments(cmd):
     return [s.strip() for s in re.split(r"&&|\|\||[;|\n]|\$\(|`", cmd) if s.strip()]
 
 
+def _lexer(seg, punctuation_chars=False):
+    lexer = shlex.shlex(seg, posix=True, punctuation_chars=punctuation_chars)
+    lexer.whitespace_split = True
+    if WINDOWS:
+        # Windows のパス（C:\Users\...）の \ を区切りとして残す（Bash では消えるが、意図したパスで判定する安全側）
+        lexer.escape = ""
+    return lexer
+
+
+def _split_words(seg):
+    """shlex.split と同じ（Windows は \\ を残す）。クォート不整合は ValueError。"""
+    return list(_lexer(seg)) if WINDOWS else shlex.split(seg)
+
+
 def tokens(seg):
     try:
-        return shlex.split(seg)
+        return _split_words(seg)
     except ValueError:
         return seg.split()
 
@@ -332,7 +459,7 @@ def strip_prefix(toks):
     i = 0
     while i < len(toks):
         t = toks[i]
-        name = os.path.basename(t)  # /usr/bin/env・/usr/bin/nice 等の絶対パス指定も同一視する
+        name = P.basename(t)  # /usr/bin/env・/usr/bin/nice 等の絶対パス指定も同一視する
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
             k, v = t.split("=", 1)
             assigns[k] = v
@@ -376,28 +503,32 @@ def is_temp(path):
     p = path.strip("'\"")
     if ".." in p:
         return False
-    p = os.path.expandvars(os.path.expanduser(p))
-    if "$" in p or not os.path.isabs(p):
+    p = P.expandvars(P.expanduser(p))
+    if "$" in p or not P.isabs(p):
         return False
     glob_at = next((i for i, c in enumerate(p) if c in "*?[]"), None)
     if glob_at is not None:
         # ワイルドカードは最終要素のみ許可（途中のリンク経由で一時領域外へ出ないよう親を検査）
         if "/" in p[glob_at:]:
             return False
-        parent = os.path.realpath(p[:p.rfind("/", 0, glob_at)] or "/")
-        p = parent + "/x"
+        cut = p.rfind("/", 0, glob_at)
+        # Windows の c:/* は親を c:/ にする（c: はドライブごとのカレントになるため）
+        parent = P.realpath((p[:cut + 1] if WINDOWS and p[cut - 1:cut] == ":" else p[:cut]) or "/")
+        p = parent.rstrip("/") + "/x"
     else:
-        p = os.path.realpath(p)
+        p = P.realpath(p)
     roots = ["/private/tmp", "/tmp", os.environ.get("TMPDIR", "")]
-    return any(root and p.startswith(os.path.realpath(root).rstrip("/") + "/")
+    if WINDOWS:
+        roots += [os.environ.get("TEMP", ""), os.environ.get("TMP", ""), tempfile.gettempdir()]
+    return any(root and p.startswith(P.realpath(root).rstrip("/") + "/")
                for root in roots)
 
 
 def _secret_roots():
     """字句パスと実体パスの両方で保護対象を判定する（保護パス自体がリンクの場合も含む）"""
-    real_aws = os.path.realpath(AWS_DIR)
+    real_aws = P.realpath(AWS_DIR)
     roots = [(AWS_DIR, SECRET_FILES)]
-    real_files = tuple(os.path.realpath(f) for f in SECRET_FILES)
+    real_files = tuple(P.realpath(f) for f in SECRET_FILES)
     if real_aws != AWS_DIR or real_files != SECRET_FILES:
         roots.append((real_aws, real_files))
     return roots
@@ -423,7 +554,7 @@ def contains_secret(path):
         return True
     prefix = path.rstrip("/") + "/"
     return any(t.startswith(prefix) for aws, files in _secret_roots()
-               for t in [aws] + [f for f in files if os.path.lexists(f)])
+               for t in [aws] + [f for f in files if P.lexists(f)])
 
 
 def brace_expand(s, limit=64):
@@ -451,7 +582,7 @@ def path_variants(value, cwd):
     deadline = time.monotonic() + GLOB_SECONDS
     paths = []
     for s in variants:
-        lexical = os.path.normpath(os.path.join(cwd, os.path.expandvars(os.path.expanduser(s))))
+        lexical = P.normpath(P.join(cwd, P.expandvars(P.expanduser(s))))
         candidates = [lexical]
         if any(c in lexical for c in "*?["):
             for n, match in enumerate(glob.iglob(lexical)):
@@ -459,7 +590,7 @@ def path_variants(value, cwd):
                     return None
                 candidates.append(match)
         for c in candidates:
-            paths += [os.path.normpath(c), os.path.realpath(c)]
+            paths += [P.normpath(c), P.realpath(c)]
     return paths
 
 
@@ -536,7 +667,7 @@ def find_in_temp(cmd):
     found = False
     for seg in split_segments(cmd):
         _, argv = strip_prefix(tokens(seg))
-        if not argv or os.path.basename(argv[0]) != "find":
+        if not argv or P.basename(argv[0]) != "find":
             continue
         found = True
         opts = argv[1:]
@@ -559,35 +690,40 @@ CACHE_SCAN_SECONDS = 1.0
 
 
 def _cache_path(path, cwd):
-    if not isinstance(path, str) or not path or '..' in path.split(os.path.sep) or any(c in path for c in '$*?[]`\n\r'):
+    if not isinstance(path, str) or not path or _has_dotdot(path) or any(c in path for c in '$*?[]`\n\r'):
         return None
-    p = os.path.sep + os.path.abspath(os.path.join(cwd or os.getcwd(), os.path.expanduser(path))).lstrip(os.path.sep)
+    p = P.abspath(P.join(cwd or os.getcwd(), P.expanduser(path)))
+    if not WINDOWS:
+        p = P.sep + p.lstrip(P.sep)
     # macOS の標準一時パス別名だけを正規化する。
     for alias, target in (('/tmp', '/private/tmp'), ('/var', '/private/var')):
-        if (p == alias or p.startswith(alias + '/')) and os.path.islink(alias) and os.path.realpath(alias) == target:
+        if (p == alias or p.startswith(alias + '/')) and P.islink(alias) and P.realpath(alias) == target:
             p = target + p[len(alias):]
-    current = os.path.sep
+    # 起点は POSIX が "/"、Windows が "c:/"（正規形）
+    anchor = p[:p.index(P.sep) + 1]
+    current = anchor
     try:
-        for part in p.split(os.path.sep)[1:]:
-            current = os.path.join(current, part)
+        for part in [anchor] if p == anchor else p[len(anchor):].split(P.sep):
+            current = P.join(current, part)
             if stat.S_ISLNK(os.lstat(current).st_mode):
                 return None
     except OSError:
         return None
-    aws = os.path.join(HOME, '.aws')
-    if p == aws or p.startswith(aws + os.path.sep):
+    aws = P.join(HOME, '.aws')
+    if p == aws or p.startswith(aws + P.sep):
         return None
     return p
 
 
 def _cache_tick(budget):
     budget[0] += 1
-    if budget[0] > CACHE_SCAN_LIMIT or time.monotonic() > budget[1]:
+    # >= : Windows の monotonic は分解能が粗く（約 15ms）、期限 0 秒でも > では切れないことがある
+    if budget[0] > CACHE_SCAN_LIMIT or time.monotonic() >= budget[1]:
         raise OSError('cache scan limit')
 
 
 def _cache_directory(path, budget):
-    if os.path.basename(path) != '__pycache__' or not stat.S_ISDIR(os.lstat(path).st_mode):
+    if P.basename(path) != '__pycache__' or not stat.S_ISDIR(os.lstat(path).st_mode):
         return False
     with os.scandir(path) as entries:
         for entry in entries:
@@ -608,7 +744,7 @@ def is_python_cache(path, cwd=None):
         if stat.S_ISDIR(mode):
             return _cache_directory(p, budget)
         return (stat.S_ISREG(mode) and p.endswith('.pyc')
-                and _cache_directory(os.path.dirname(p), budget))
+                and _cache_directory(P.dirname(p), budget))
     except OSError:
         return False
 
@@ -617,23 +753,23 @@ def _cache_delete_target(path, cwd):
     if is_python_cache(path, cwd):
         return True
     # ワイルドカードは検証済みキャッシュの直下に限定する。
-    parent, leaf = os.path.split(path)
+    parent, leaf = P.split(path)
     return leaf in ('*.pyc', '*') and is_python_cache(parent, cwd)
 
 
 def _safe_delete_target(path, cwd, cache_allowed=True):
-    if '..' in path.split(os.path.sep):
+    if _has_dotdot(path):
         return False
     if '$' in path:
         # 一時パスの既存変数対応は維持する。
         return is_temp(path)
-    absolute = os.path.abspath(os.path.join(cwd, os.path.expanduser(path)))
+    absolute = P.abspath(P.join(cwd, P.expanduser(path)))
     return is_temp(absolute) or (cache_allowed and _cache_delete_target(path, cwd))
 
 
 def find_python_cache(argv, cwd):
     """find の削除式全体と全一致キャッシュを制限時間内で検査。"""
-    if not argv or os.path.basename(argv[0]) != 'find':
+    if not argv or P.basename(argv[0]) != 'find':
         return False
     args = argv[1:]
     roots = []
@@ -662,7 +798,7 @@ def find_python_cache(argv, cwd):
         while stack:
             p = stack.pop()
             _cache_tick(budget)
-            if os.path.basename(p) == '__pycache__':
+            if P.basename(p) == '__pycache__':
                 if _cache_path(p, cwd) is None or not _cache_directory(p, budget):
                     return False
                 continue
@@ -801,7 +937,7 @@ def _bedrock_aws_args(inner):
 
 
 def bedrock_wrapper_path():
-    return os.path.realpath(os.path.join(HARNESS_HOME, "tools/aws", BEDROCK_RUN_NAME)) if HARNESS_HOME else None
+    return P.realpath(P.join(HARNESS_HOME, "tools/aws", BEDROCK_RUN_NAME)) if HARNESS_HOME else None
 
 
 def check_bedrock_run(argv, cwd):
@@ -837,11 +973,11 @@ def check_bedrock_segment(argv, assigns, cwd):
     宛先や実行ファイル探索を変える代入は拒否。該当しなければ None。"""
     expected = bedrock_wrapper_path()
     hits = [i for i, t in enumerate(argv)
-            if os.path.basename(t) == BEDROCK_RUN_NAME
+            if P.basename(t) == BEDROCK_RUN_NAME
             or (expected and t.endswith(".py") and _real(t, cwd) == expected)]
     if not hits:
         return None
-    if hits != [1] or not PYTHON_RE.match(os.path.basename(argv[0])):
+    if hits != [1] or not PYTHON_RE.match(P.basename(argv[0])):
         return ("deny", f"{BEDROCK_RUN_NAME} は `python3 <ハーネス>/tools/aws/{BEDROCK_RUN_NAME} <コマンド>` の形でのみ実行可"
                         "（インタプリタオプション・uv 経由・別名・入れ子は不可）")
     if any(BEDROCK_ENV_DENY_RE.match(k) for k in assigns if k != CHDIR):
@@ -854,14 +990,14 @@ INTERPRETERS = re.compile(r"^(python[0-9.]*|pypy[0-9.]*|sh|bash|zsh|dash|ksh|sou
 
 def _real(value, cwd):
     value = re.sub(r"^\d*[<>]+", "", value)
-    return os.path.realpath(os.path.join(cwd, os.path.expandvars(os.path.expanduser(value))))
+    return P.realpath(P.join(cwd, P.expandvars(P.expanduser(value))))
 
 
 def _executed(argv):
     """セグメントで実行されるスクリプトのパスと、インライン実行コード（-c・-m の引数）を返す。"""
     if not argv:
         return None, None
-    prog = os.path.basename(argv[0])
+    prog = P.basename(argv[0])
     if not INTERPRETERS.match(prog):
         return argv[0], None
     k = 1
@@ -875,8 +1011,8 @@ def _executed(argv):
 def _assume_role_targets():
     paths = [ASSUME_ROLE_CMD] if ASSUME_ROLE_CMD else []
     if HARNESS_HOME:
-        paths += [os.path.join(HARNESS_HOME, "tools/aws", n) for n in ("assume_role.sh", "assume_role.py")]
-    return {os.path.realpath(p) for p in paths}
+        paths += [P.join(HARNESS_HOME, "tools/aws", n) for n in ("assume_role.sh", "assume_role.py")]
+    return {P.realpath(p) for p in paths}
 
 
 def _assume_role_exact(cmd, cwd):
@@ -893,14 +1029,14 @@ def _assume_role_exact(cmd, cwd):
                 and feed[:-1] in (["echo"], ["printf", "%s\\n"])):
             return False
     argv = tokens(parts[-1])
-    return (len(argv) == 3 and _real(argv[0], cwd) == os.path.realpath(ASSUME_ROLE_CMD)
+    return (len(argv) == 3 and _real(argv[0], cwd) == P.realpath(ASSUME_ROLE_CMD)
             and argv[1] == "--awsEnv" and argv[2] in ASSUME_ROLE_ENVS)
 
 
 def check_harness_exec(cmd, cwd):
     """インストーラ適用と認証更新スクリプトの実行判定。"allow"（認証更新の正規形）・(decision, reason)・None。"""
     segments = [strip_prefix(tokens(seg))[1] for seg in split_segments(cmd)]
-    installer = os.path.realpath(os.path.join(HARNESS_HOME, "install/install.py")) if HARNESS_HOME else None
+    installer = P.realpath(P.join(HARNESS_HOME, "install/install.py")) if HARNESS_HOME else None
     # 適用はガード設定（hook sidecar）を書き換えるため、経路・ラッパー・インライン実行に関係なく承認を求める。
     # argparse の省略形（--ap 等）も含め、"apply" を含む・--a で始まる引数があれば適用とみなす。
     runs_installer = "install.py" in cmd or any(
@@ -908,14 +1044,14 @@ def check_harness_exec(cmd, cwd):
     if runs_installer and ("apply" in cmd.lower() or any(t.startswith("--a") for argv in segments for t in argv)):
         return ("ask", "ハーネスのインストーラ適用（--apply）はガード設定を変更するため確認が必要")
     targets = _assume_role_targets()
-    names = {os.path.basename(p) for p in targets} | {"assume_role.py"}
+    names = {P.basename(p) for p in targets} | {"assume_role.py"}
     hit = False
     for argv in segments:
         script, inline = _executed(argv)
         if inline is not None:
             hit = hit or any(n in inline for n in names)
         elif script:
-            hit = hit or _real(script, cwd) in targets or os.path.basename(script) in names
+            hit = hit or _real(script, cwd) in targets or P.basename(script) in names
     if not hit:
         return None
     if _assume_role_exact(cmd, cwd):
@@ -945,7 +1081,7 @@ def legacy_write_text(text):
 FALLBACK_PROTECTED_NAMES = ("hooks/", "install/", "settings/", "tools/aws/", "config.local.json", ".githooks",
                             "privacy_check.py", "harness_setup.py", "setup.sh", "apply.sh")
 # cd 先として字句的に確定できる引数（変数・置換・クォート・ワイルドカードを含まない）
-CD_TARGET_RE = re.compile(r"[\w./~+@%,:=-]+")
+CD_TARGET_RE = re.compile(r"[\w./~+@%,:=\\-]+" if WINDOWS else r"[\w./~+@%,:=-]+")
 # サブシェル・グループ・制御構文の先頭語（直後の cd を検出するため読み飛ばす）
 SHELL_LEADERS = {"(", "{", "!", "if", "then", "else", "elif", "do", "while", "until"}
 WRITE_CWD_LIMIT = 32
@@ -957,7 +1093,7 @@ class WriteState:
     nobase: hook 入力に cwd がない（相対パスは保護名で判定）。unknown: cd 先が確定できない（相対パスの書き込みは承認）。"""
 
     def __init__(self, dirs=(), nobase=False):
-        self.dirs = list(dict.fromkeys(os.path.normpath(d) for d in dirs))
+        self.dirs = list(dict.fromkeys(P.normpath(d) for d in dirs))
         self.nobase = nobase or not self.dirs
         self.unknown = False
         self.pushed = False
@@ -973,9 +1109,7 @@ class WriteState:
 def _shell_words(seg):
     """リダイレクト演算子を独立した語にして分割する（クォート内の > は語の一部のまま）。失敗時は None。"""
     try:
-        lexer = shlex.shlex(seg, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        return list(lexer)
+        return list(_lexer(seg, punctuation_chars=True))
     except ValueError:
         return None
 
@@ -983,7 +1117,7 @@ def _shell_words(seg):
 def _update_write_cwd(state, seg, dynamic_cd):
     """cd・pushd・popd を実行ディレクトリ候補に反映する（eval 内の cd は scan_writes が同じ候補で走査する）。"""
     try:
-        toks = shlex.split(seg)
+        toks = _split_words(seg)
     except ValueError:
         # クォートがセグメントをまたぐ断片（sh -c 'cd x; …' の先頭など）はクォート記号を外して読む
         toks = [t.strip("'\"") for t in seg.split()]
@@ -995,7 +1129,7 @@ def _update_write_cwd(state, seg, dynamic_cd):
     _, argv = strip_prefix(toks)
     if not argv:
         return
-    prog = os.path.basename(argv[0])
+    prog = P.basename(argv[0])
     if prog == "popd":
         # このコマンド内の pushd 以前の位置はすでに候補にある。それ以外はディレクトリスタック次第
         if not state.pushed:
@@ -1013,15 +1147,15 @@ def _update_write_cwd(state, seg, dynamic_cd):
         state.unknown = True
         return
     state.pushed = state.pushed or prog == "pushd"
-    target = os.path.expanduser(args[0])
+    target = P.expanduser(args[0])
     if target.startswith("~"):
         state.unknown = True
         return
     # 追加中のリストを走査しないよう複製を使う
-    bases = [""] if os.path.isabs(target) else list(state.dirs)
+    bases = [""] if P.isabs(target) else list(state.dirs)
     for base in bases:
-        joined = os.path.join(base, target)
-        for d in (os.path.normpath(joined), os.path.realpath(joined)):
+        joined = P.join(base, target)
+        for d in (P.normpath(joined), P.realpath(joined)):
             if d not in state.dirs:
                 state.dirs.append(d)
     if len(state.dirs) > WRITE_CWD_LIMIT:
@@ -1096,9 +1230,9 @@ def _copy_destinations(target, sources, recursive):
         if source in (".", "./") or source.endswith(("/.", "/./")) or source.endswith("/"):
             if recursive:
                 out.append((target[0], True, True))
-        name = os.path.basename(source.rstrip("/"))
+        name = P.basename(source.rstrip("/"))
         if name not in ("", ".", ".."):
-            out.append((os.path.join(target[0], name), True, recursive))
+            out.append((P.join(target[0], name), True, recursive))
     return out
 
 
@@ -1147,7 +1281,7 @@ def _git_writes(args, assigns=None):
     while k < len(args) and args[k].startswith("-"):
         a = args[k]
         if a == "-C" and k + 1 < len(args):
-            cbase = os.path.join(cbase or "", args[k + 1])
+            cbase = P.join(cbase or "", args[k + 1])
             k += 2
             continue
         plain = False  # -c 等で pull の動作（rebase・フック）を変えられるため、-C 以外があれば例外にしない
@@ -1165,12 +1299,12 @@ def _git_writes(args, assigns=None):
     if worktree is None and assigns.get("GIT_WORK_TREE"):
         worktree = assigns["GIT_WORK_TREE"]
     # --work-tree は -C 適用後の位置から解釈される（絶対パスなら置き換え）
-    base = os.path.join(cbase or "", worktree) if worktree else cbase
+    base = P.join(cbase or "", worktree) if worktree else cbase
     sub = args[k] if k < len(args) else ""
     rest = args[k + 1:]
     if _git_config_changes(sub, rest):
         # 設定は git ディレクトリに書かれるため、--git-dir・GIT_DIR の指定先（ハーネスの .git ならハーネス内）も判定する
-        return [], [(base, True)] + ([(os.path.join(cbase or "", gitdir), True)] if gitdir else [])
+        return [], [(base, True)] + ([(P.join(cbase or "", gitdir), True)] if gitdir else [])
     if sub not in GIT_TREE_SUBS:
         return [], []
     if sub == "stash" and rest[:1] in (["list"], ["show"]):
@@ -1200,7 +1334,7 @@ def _url_basename(url):
     """URL のパス末尾のファイル名（curl -O・wget の既定の保存名）。スキームなしは最初の / までをホストとみなす。"""
     path = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url)
     path = path.split("/", 1)[1] if "/" in path else ""
-    return os.path.basename(re.split(r"[?#]", path)[0])
+    return P.basename(re.split(r"[?#]", path)[0])
 
 
 def _under(directory, value):
@@ -1208,8 +1342,8 @@ def _under(directory, value):
     絶対パスの扱い（そのまま使うか前に付けるか）は実装依存のため、両方を候補にする。"""
     if not directory:
         return [value]
-    plain = value if value.startswith(("/", "~")) else os.path.join(directory, value)
-    return list(dict.fromkeys((plain, os.path.join(directory, value.lstrip("/")))))
+    plain = value if value.startswith(("/", "~")) else P.join(directory, value)
+    return list(dict.fromkeys((plain, P.join(directory, value.lstrip("/")))))
 
 
 # wget の保存先にサーバー側のパスを再現し得るオプション（-nH・--cut-dirs と組み合わせると URL のパスがそのまま保存先になる）
@@ -1246,7 +1380,7 @@ def _command_writes(argv, text, assigns=None):
     戻り値は (候補 [(値, 厳密, 祖先判定)], 展開先 [(ディレクトリ値 or None=実行ディレクトリ, ハーネス内も対象)])。
     厳密: 未展開の変数を含むとき実行ディレクトリがハーネス内なら承認（スクリプト・コードの引数は対象外）。
     祖先判定: 保護パスの上位ディレクトリも承認対象（mv・ln・chmod）。"""
-    prog, args = os.path.basename(argv[0]), argv[1:]
+    prog, args = P.basename(argv[0]), argv[1:]
     if prog == "tee":
         return [(v, True, False) for v in _positional(args)], []
     if prog in ("sed", "perl"):
@@ -1275,7 +1409,7 @@ def _command_writes(argv, text, assigns=None):
         elif targets:
             paths = targets
         elif prog == "ln" and len(pos) == 1:
-            paths = [os.path.basename(pos[0].rstrip("/")) or pos[0]]  # 実行ディレクトリに同名のリンクを作る
+            paths = [P.basename(pos[0].rstrip("/")) or pos[0]]  # 実行ディレクトリに同名のリンクを作る
         else:
             paths = pos[-1:] if len(pos) >= 2 else []  # cp・ln・install は宛先のみ（読み取り元は対象外）
         cands = [(v, True, prog in ("mv", "ln")) for v in paths]
@@ -1343,7 +1477,7 @@ def _segment_writes(seg, state):
     if words is None:
         # 字句解析できない場合は書き込みらしければ演算子・クォート記号で区切ったすべての語を対象にする（安全側）
         parts = [p for p in re.split(r"[<>&|;()'\"\s]+", clean) if p]
-        first = os.path.basename(parts[0]) if parts else ""
+        first = P.basename(parts[0]) if parts else ""
         if not (pending or is_write_text(clean) or first in WRITE_PROGS):
             return None
         return [(p, False, False) for p in (parts if pending else parts[1:])], []
@@ -1386,7 +1520,7 @@ WRITE_PROGS = {"tee", "sed", "perl", "cp", "ln", "mv", "install", "chmod", "trun
 
 def _in_harness(path):
     return bool(HARNESS_HOME) and any(path == h or path.startswith(h + "/")
-                                      for h in dict.fromkeys((HARNESS_HOME, os.path.realpath(HARNESS_HOME))))
+                                      for h in dict.fromkeys((HARNESS_HOME, P.realpath(HARNESS_HOME))))
 
 
 def _protected_ancestor(path):
@@ -1396,16 +1530,16 @@ def _protected_ancestor(path):
 
 
 def _check_write_target(value, strict, ancestor, state):
-    expanded = os.path.expandvars(os.path.expanduser(value))
+    expanded = P.expandvars(P.expanduser(value))
     if strict and "$" in expanded and any(_in_harness(d) for d in state.dirs):
         return ("ask", f"未展開の変数を含む書き込み先（実行ディレクトリがハーネス内）: {value[:200]}")
-    if os.path.isabs(expanded):
+    if P.isabs(expanded):
         bases = ["/"]
     else:
         if state.unknown:
             return ("ask", f"実行ディレクトリが確定できないため相対パスの書き込みは確認が必要: {value[:200]}")
         if state.nobase:
-            padded = "/" + os.path.normpath(expanded) + "/"
+            padded = "/" + P.normpath(expanded) + "/"
             if any("/" + n.rstrip("/") + "/" in padded for n in FALLBACK_PROTECTED_NAMES):
                 return ("ask", f"ガード設定/認証関連ファイルの変更を含む可能性: {value[:200]}")
         bases = state.dirs
@@ -1431,17 +1565,17 @@ def _check_tree(value, harness, state):
     if value is None:
         if state.unknown:
             return ("ask", "実行ディレクトリが確定できないため展開・パッチ適用は確認が必要")
-        dirs = [x for d in state.dirs for x in (d, os.path.realpath(d))]
+        dirs = [x for d in state.dirs for x in (d, P.realpath(d))]
     else:
-        expanded = os.path.expandvars(os.path.expanduser(value))
+        expanded = P.expandvars(P.expanduser(value))
         if "$" in expanded:
             if any(_in_harness(d) for d in state.dirs):
                 return ("ask", f"未展開の変数を含む展開先（実行ディレクトリがハーネス内）: {value[:200]}")
             return None
-        if not os.path.isabs(expanded) and state.unknown:
+        if not P.isabs(expanded) and state.unknown:
             return ("ask", "実行ディレクトリが確定できないため展開・パッチ適用は確認が必要")
         dirs = []
-        for base in (["/"] if os.path.isabs(expanded) else state.dirs):
+        for base in (["/"] if P.isabs(expanded) else state.dirs):
             paths = path_variants(value, base)
             if paths is None:
                 return ("ask", "ワイルドカードの展開対象が多すぎるため確認が必要")
@@ -1512,7 +1646,7 @@ HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([A-Za-z0-9_.-]+)'|\"([A-Za-z0-9_.-]+)
 
 def _loose_words(text):
     try:
-        return shlex.split(text)
+        return _split_words(text)
     except ValueError:
         return [t.strip("'\"") for t in text.split()]
 
@@ -1522,7 +1656,7 @@ def _git_message_command(words):
     while words and words[0] in SHELL_LEADERS:
         words = words[1:]
     _, argv = strip_prefix(words)
-    if not argv or os.path.basename(argv[0]) != "git":
+    if not argv or P.basename(argv[0]) != "git":
         return None
     k = 1
     while k < len(argv) and argv[k].startswith("-"):
@@ -1541,7 +1675,7 @@ def _heredoc_is_data(inner, piped, enclosing):
     _, argv = strip_prefix(words)
     if not argv:
         return False
-    prog = os.path.basename(argv[0])
+    prog = P.basename(argv[0])
     if enclosing:
         return prog == "cat" and enclosing[0] is not None and _git_message_command(_loose_words(enclosing[0])) is not None
     if prog in ("cat", "tee"):
@@ -1636,13 +1770,13 @@ def scan_writes(cmd, state, depth=0):
                 return r
             _update_write_cwd(state, seg, dynamic_cd)
         try:
-            toks = shlex.split(joined)
+            toks = _split_words(joined)
         except ValueError:
             continue
         while toks and toks[0] in SHELL_LEADERS:
             toks.pop(0)
         _, argv = strip_prefix(toks)
-        prog = os.path.basename(argv[0]) if argv else ""
+        prog = P.basename(argv[0]) if argv else ""
         if prog in ("sh", "bash", "zsh", "dash", "ksh"):
             ci = next((i for i, a in enumerate(argv[1:], 1)
                        if a.startswith("-") and "c" in a[1:] and not a.startswith("--")), None)
@@ -1660,14 +1794,21 @@ def scan_writes(cmd, state, depth=0):
 
 
 def check_bash(cmd, depth=0, cwd=None, write_state=None):
-    decisions = []
-    seen_find = False
-    safe_finds = True
-    cwd_known = True
     if depth > 4:
         return ("ask", "シェルの入れ子が深すぎるため確認が必要")
+    r = _text_checks(cmd)
+    if r:
+        return r
+    # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
+    # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
+    write_hit = None
+    if depth == 0:
+        write_hit = scan_writes(cmd, write_state or WriteState([cwd] if cwd else []))
+    return _check_bash_segments(cmd, depth, cwd, write_hit)
 
-    # ここから長さ上限の判定までは、入力長に対して線形時間の判定だけを置く（長い入力でも deny を返すため）。
+
+def _text_checks(cmd, extra_cred=()):
+    """Bash・PowerShell 共通の、入力長に対して線形時間の文字列判定（長い入力でも deny を返すため先に行う）。"""
     # 認証情報ファイルの読み取り禁止
     if SECRET_WORDS.search(cmd):
         return ("deny", "認証情報ファイルへのアクセスは禁止")
@@ -1679,7 +1820,7 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     if ordered_search(((r"\baws\b", r"--with-decryption\b"), "\n"), cmd):
         return ("deny", "復号した秘密情報の取得は禁止")
 
-    for pat in CRED_BYPASS + (PROFILE_BYPASS if AWS_ENABLED else []):
+    for pat in CRED_BYPASS + (PROFILE_BYPASS if AWS_ENABLED else []) + list(extra_cred):
         if ordered_search(pat, cmd):
             return ("deny", "AWS 認証情報/プロファイルの差し替えは禁止（AI は設定したプロファイル固定）")
     for pat in DEPLOY_PATTERNS:
@@ -1693,11 +1834,14 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
         if re.search(r"\baws\b", cmd) or re.search(r"(?<![\w.-])\.aws(?![\w.-])", cmd):
             return ("deny", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）うえ AWS 関連の操作を含むため拒否")
         return ("ask", f"コマンドが長すぎる（{len(cmd)} 文字 > {BASH_MAX_CHARS}）ため確認が必要")
-    # 書き込み判定の実行ディレクトリ候補。cwd が渡されなければ（hook 入力に cwd なし）保護名で判定する。
-    # 入れ子（sh -c・eval）は最上位の scan_writes が cd を反映して走査済み。結果は他の判定（deny を含む）の後に返す
-    write_hit = None
-    if depth == 0:
-        write_hit = scan_writes(cmd, write_state or WriteState([cwd] if cwd else []))
+    return None
+
+
+def _check_bash_segments(cmd, depth, cwd, write_hit):
+    decisions = []
+    seen_find = False
+    safe_finds = True
+    cwd_known = True
     cwd = cwd or os.getcwd()
     r = check_harness_exec(cmd, cwd)
     if r == "allow":
@@ -1715,7 +1859,7 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
             return ("ask", "実行ディレクトリを変更するラッパーのため確認が必要")
         if not argv:
             continue
-        prog = os.path.basename(argv[0])
+        prog = P.basename(argv[0])
         # 相対パス・./・シンボリックリンク経由の秘密ファイル読み取りも遮断する。
         recursive = is_recursive_reader(prog, argv)
         for arg in argv[1:]:
@@ -1725,7 +1869,7 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
                 value = re.sub(r"^(file|fileb)://", "", value)
                 if not value or value.startswith("-"):
                     continue
-                expanded = os.path.expandvars(os.path.expanduser(value))
+                expanded = P.expandvars(P.expanduser(value))
                 if ".aws/" in expanded and any(c in expanded for c in "*?[]$"):
                     return ("deny", "曖昧な AWS 認証ファイルアクセスは禁止")
                 # 再帰読み取りのパターン（例: grep -r /Users/x src）はパス扱いしない
@@ -1743,8 +1887,8 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
                 if r:
                     return r
         if prog == "cd":
-            if len(argv) == 2 and not argv[1].startswith("-") and not any(c in argv[1] for c in "$*?[]`\n\r") and ".." not in argv[1].split(os.path.sep):
-                cwd = os.path.abspath(os.path.join(cwd, os.path.expanduser(argv[1])))
+            if len(argv) == 2 and not argv[1].startswith("-") and not any(c in argv[1] for c in "$*?[]`\n\r") and not _has_dotdot(argv[1]):
+                cwd = P.abspath(P.join(cwd, P.expanduser(argv[1])))
             else:
                 cwd_known = False
         elif prog in ("pushd", "popd"):
@@ -1802,7 +1946,7 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
                     continue
                 else:
                     targets.append(arg)
-            if parent_delete or not targets or not all((cwd_known or os.path.isabs(t)) and _safe_delete_target(t, cwd, cache_options) for t in targets):
+            if parent_delete or not targets or not all((cwd_known or P.isabs(t)) and _safe_delete_target(t, cwd, cache_options) for t in targets):
                 decisions.append(("ask", f"ファイル削除: {seg[:200]}"))
         if prog == "find":
             seen_find = True
@@ -1827,17 +1971,317 @@ def check_bash(cmd, depth=0, cwd=None, write_state=None):
     for seg in split_segments(cmd):
         # /dev/null への出力捨て・fd 複製（2>/dev/null・>&2 等）は書き込みではない
         seg = DEVNULL_RE.sub(" ", seg)
-        if any(w in seg for w in PROTECTED_WRITE_WORDS) and is_write_text(seg):
+        if any(w in _norm_text(seg) for w in PROTECTED_WRITE_WORDS) and is_write_text(seg):
             return ("ask", "ガード設定/認証関連ファイルの変更を含むコマンド")
     # 相対パス・cd 後の書き込み対象を実行ディレクトリ基準で解釈した判定
     return write_hit
 
 
+# ---------------- PowerShell（Windows の PowerShell 道具） ----------------
+# 文字列判定の補助防御で、PowerShell の完全な解析器ではない。判定できない構文は確認に回す。
+PS_DELETE = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir", "remove-itemproperty", "rp"}
+PS_WRITE = {"set-content", "sc", "add-content", "ac", "out-file", "tee-object", "tee", "clear-content", "clc",
+            "copy-item", "cpi", "cp", "copy", "move-item", "mi", "mv", "move", "rename-item", "rni", "ren",
+            "new-item", "ni", "md", "mkdir", "set-item", "si", "new-itemproperty", "set-itemproperty", "sp",
+            "export-csv", "epcsv", "export-clixml", "expand-archive", "compress-archive", "set-acl",
+            "invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm", "start-bitstransfer"}
+# 移動元も保護パスの外へ出す操作（上位ディレクトリの移動で保護を外せる）
+PS_MOVE = {"move-item", "mi", "mv", "move", "rename-item", "rni", "ren", "set-acl"}
+# 再帰読み取り（秘密情報を含む上位ディレクトリも対象）
+PS_RECURSIVE_READ = {"copy-item", "cpi", "cp", "copy", "compress-archive", "select-string", "sls"}
+# 文字列を再解釈・別プロセスで実行するため判定できないもの
+PS_DYNAMIC = {"invoke-expression", "iex", "invoke-command", "icm", "start-process", "saps", "start", "start-job",
+              "sajb", "add-type", "invoke-item", "ii", "new-psdrive", "ndr", "set-alias", "sal", "new-alias", "nal",
+              "register-scheduledtask", "start-threadjob"}
+PS_CD = {"set-location", "sl", "cd", "chdir", "push-location", "pushd", "pop-location", "popd"}
+PS_SHELLS = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+POSIX_SHELLS = {"sh", "sh.exe", "bash", "bash.exe", "zsh", "dash"}
+# パス以外の値を取る主な引数（値を書き込み先・削除対象とみなさない）
+PS_VALUE_PARAMS = {"value", "encoding", "filter", "include", "exclude", "itemtype", "type", "name", "newname",
+                   "erroraction", "ea", "warningaction", "wa", "pattern", "inputobject", "delimiter", "depth",
+                   "method", "uri", "body", "headers", "contenttype", "useragent", "credential", "stream",
+                   "propertytype", "width", "first", "last", "tail", "totalcount", "head", "readcount"}
+PS_PATH_PARAMS = {"path", "literalpath", "lp", "pspath", "destination", "dest", "filepath", "outfile", "target",
+                  "outputpath", "destinationpath"}
+PS_NULL_TARGETS = {"$null", "nul", "nul:"}
+# PowerShell の環境変数による認証情報・プロファイルの差し替え（Bash の CRED_BYPASS 以外の書き方）
+PS_CRED_BYPASS = [
+    r"(?i)\[(System\.)?Environment\]::SetEnvironmentVariable\s*\(\s*['\"]AWS_",
+    r"(?i)\b(Remove-Item|ri|rm|del|Set-Item|si|New-Item|ni|Clear-Item|cli)\s+(-\w+\s+)*['\"]?env:\\?AWS_",
+]
+PS_PROFILE_RE = re.compile(r"(?i)\$env:AWS_(DEFAULT_)?PROFILE\s*=\s*(['\"]?)([^'\";|\s]*)\2")
+PS_DOTNET_DELETE_RE = re.compile(r"(?i)\[(System\.)?IO\.(File|Directory|FileInfo|DirectoryInfo)\]::Delete\b|\.Delete\s*\(")
+PS_DOTNET_WRITE_RE = re.compile(r"(?i)\[(System\.)?IO\.(File|Directory)\]::(Write|Append|Copy|Move|Replace|Create|Open|"
+                                r"SetAttributes|SetAccessControl)\w*")
+PS_WRITE_TEXT_RE = re.compile(r"(?i)(?<![\w-])(" + "|".join(sorted(map(re.escape, PS_WRITE | PS_DELETE), key=len,
+                                                               reverse=True)) + r")(?![\w-])|>")
+
+
+def _ps_tokens(text):
+    """PowerShell の簡易字句解析。区切り（; | && || 改行・括弧・$(）で区間に分け、各区間の語のリストを返す。
+    ' ' はそのまま、" " はバッククォートのエスケープだけ処理する（変数展開はしない）。リダイレクトは独立した語。"""
+    segments, words, word, quoted = [], [], [], False
+    i, n = 0, len(text)
+
+    def flush_word():
+        nonlocal word, quoted
+        if word or quoted:
+            words.append("".join(word))
+        word, quoted = [], False
+
+    def flush_segment():
+        nonlocal words
+        flush_word()
+        if words:
+            segments.append(words)
+        words = []
+
+    while i < n:
+        c = text[i]
+        if c == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'" and j + 1 < n and text[j + 1] == "'":
+                    word.append("'")
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                word.append(text[j])
+                j += 1
+            quoted, i = True, j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                if text[j] == "`" and j + 1 < n:
+                    j += 1
+                word.append(text[j])
+                j += 1
+            quoted, i = True, j + 1
+        elif c == "`" and i + 1 < n:
+            if text[i + 1] in "\r\n":  # 行継続
+                i += 2
+                continue
+            word.append(text[i + 1])
+            i += 2
+        elif c in " \t":
+            flush_word()
+            i += 1
+        elif c in ";\r\n{}()|" or text[i:i + 2] == "&&":
+            flush_segment()
+            i += 2 if text[i:i + 2] in ("&&", "||") else 1
+        elif c == "$" and text[i:i + 2] == "$(":
+            flush_segment()
+            i += 2
+        elif c in "<>" or (c in "0123456789*" and text[i + 1:i + 2] == ">" and not word):
+            # リダイレクト（> >> 2> *> 2>&1）を独立した語にする
+            flush_word()
+            j = i
+            while j < n and text[j] in "0123456789*<>&":
+                j += 1
+            words.append(text[i:j])
+            i = j
+        else:
+            word.append(c)
+            i += 1
+    flush_segment()
+    return segments
+
+
+def _ps_expand(value):
+    """$env:NAME・${env:NAME}・$HOME・~ を展開する。展開できない $ が残れば None。"""
+    s = re.sub(r"(?i)\$\{env:([A-Za-z_][\w]*)\}|\$env:([A-Za-z_][\w]*)",
+               lambda m: os.environ.get(m.group(1) or m.group(2), "\0"), value)
+    s = re.sub(r"(?i)\$HOME\b", lambda m: HOME, s)
+    if "\0" in s or "$" in s:
+        return None
+    return s
+
+
+def _ps_params(argv):
+    """コマンドの引数を (パス候補, 引数名の集合) に分ける。値を取る引数か不明な語はパス候補に含める（安全側）。"""
+    paths, names, k = [], set(), 1
+    while k < len(argv):
+        a = argv[k]
+        k += 1
+        if re.match(r"^-[A-Za-z][\w-]*:?", a) and not re.match(r"^-\d", a):
+            name, _, attached = a[1:].partition(":")
+            name = name.lower()
+            names.add(name)
+            if attached:
+                if name in PS_PATH_PARAMS:
+                    paths.append(attached)
+                continue
+            if name in PS_PATH_PARAMS:
+                if k < len(argv):
+                    paths.append(argv[k])
+                    k += 1
+            elif name in PS_VALUE_PARAMS and k < len(argv):
+                k += 1
+            continue
+        paths.append(a)
+    return paths, names
+
+
+def _ps_redirects(words):
+    """リダイレクトの書き込み先と、リダイレクトを除いた語を返す。"""
+    targets, rest, k = [], [], 0
+    while k < len(words):
+        w = words[k]
+        if re.fullmatch(r"[0-9*]?>>?", w) or re.fullmatch(r"[0-9*]?>>?&\d", w) or w == "<":
+            if not w.endswith(tuple("0123456789")) and k + 1 < len(words):
+                if w != "<":
+                    targets.append(words[k + 1])
+                k += 2
+                continue
+            k += 1
+            continue
+        rest.append(w)
+        k += 1
+    return targets, rest
+
+
+def _ps_as_bash(argv, cwd, cwd_known):
+    """外部コマンド（git・aws・python・sh -c 等）は Bash と同じ判定（書き込み先の走査を含む）に通す。
+    argv[0] の拡張子 .exe 等は除く（python.exe → python）。"""
+    first = re.sub(r"(?i)\.(exe|cmd|bat|com)$", "", argv[0])
+    state = WriteState([cwd])
+    state.unknown = not cwd_known
+    return check_bash(shlex.join([first] + argv[1:]), 0, cwd, state)
+
+
+def check_powershell(cmd, depth=0, cwd=None):
+    """PowerShell 道具のコマンドを判定する。問題があれば (decision, reason)。"""
+    if depth > 4:
+        return ("ask", "シェルの入れ子が深すぎるため確認が必要")
+    extra = list(PS_CRED_BYPASS)
+    r = _text_checks(cmd, extra)
+    if r:
+        return r
+    if AWS_ENABLED:
+        for m in PS_PROFILE_RE.finditer(cmd):
+            if m.group(3) != ALLOWED_PROFILE:
+                return ("deny", f"AWS_PROFILE の解除・差し替えは禁止（{ALLOWED_PROFILE} 固定）")
+    cwd = cwd or os.getcwd()
+    cwd_known = True
+    decisions = []
+    for seg in _ps_tokens(cmd):
+        redirects, argv = _ps_redirects(seg)
+        while argv and argv[0] in ("&", "."):
+            if argv[0] == "." and len(argv) > 1:
+                decisions.append(("ask", f"スクリプトのドットソース実行は内容の確認が必要: {' '.join(argv)[:200]}"))
+            argv = argv[1:]
+        # 代入（$x = ...）の右辺をコマンドとして扱う
+        if len(argv) >= 2 and re.fullmatch(r"\$[\w:]+", argv[0]) and argv[1] in ("=", "+="):
+            argv = argv[2:]
+        for target in redirects:
+            if target.lower() in PS_NULL_TARGETS:
+                continue
+            value = _ps_expand(target)
+            if value is None:
+                decisions.append(("ask", f"書き込み先に展開できない変数を含む: {target[:200]}"))
+                continue
+            r = check_edit(value if P.isabs(value) else P.join(cwd, value))
+            if r:
+                return r
+        if not argv:
+            continue
+        name = P.basename(argv[0]) if ("/" in argv[0] or "\\" in argv[0]) else argv[0].lower()
+        expanded = [_ps_expand(a) for a in argv[1:]]
+        # すべての引数を秘密情報の読み取りとして検査する（Get-Content・Copy-Item・type 等）
+        for raw, value in zip(argv[1:], expanded):
+            candidate = value or raw
+            if candidate.startswith("-"):  # -Path:<値> 形式は値を検査する
+                candidate = candidate.partition(":")[2]
+            if candidate:
+                r = secret_access(candidate, cwd, is_secret)
+                if r:
+                    return r
+        if name in PS_DYNAMIC:
+            decisions.append(("ask", f"文字列の再解釈・別プロセス実行は判定できないため確認が必要: {' '.join(argv)[:200]}"))
+            continue
+        if name in PS_SHELLS:
+            lowered = [a.lower() for a in argv[1:]]
+            ci = next((k for k, a in enumerate(lowered, 1) if a in ("-command", "-c")), None)
+            if any(a.startswith(("-enc", "-e", "-ec")) and not a.startswith(("-ex", "-err")) for a in lowered) or ci is None:
+                return ("ask", "PowerShell の別プロセス実行（-EncodedCommand・-File 等）は内容の確認が必要")
+            if not cwd_known:
+                return ("ask", "実行ディレクトリが不明なシェル操作")
+            r = check_powershell(" ".join(argv[ci + 1:]), depth + 1, cwd)
+            if r:
+                return r
+            continue
+        if name in ("cmd", "cmd.exe", "wsl", "wsl.exe"):
+            return ("ask", "cmd・wsl 経由の実行は判定できないため確認が必要")
+        if name in POSIX_SHELLS:
+            r = _ps_as_bash(argv, cwd, cwd_known)
+            if r:
+                return r
+            continue
+        if name in PS_CD:
+            paths, _ = _ps_params(argv)
+            target = _ps_expand(paths[0]) if len(paths) == 1 else None
+            if target and not _has_dotdot(target) and not any(c in target for c in "*?[]"):
+                cwd = P.abspath(P.join(cwd, target))
+            else:
+                cwd_known = False
+            continue
+        paths, names = _ps_params(argv)
+        if name in PS_DELETE:
+            values = [_ps_expand(p) for p in paths]
+            if not values or not all(v and (cwd_known or P.isabs(v)) and _safe_delete_target(v, cwd) for v in values):
+                decisions.append(("ask", f"ファイル削除: {' '.join(argv)[:200]}"))
+            continue
+        if name in PS_WRITE:
+            recursive = "recurse" in names or "r" in names or name == "compress-archive"
+            for p in paths:
+                value = _ps_expand(p)
+                if value is None:
+                    decisions.append(("ask", f"書き込み先に展開できない変数を含む: {p[:200]}"))
+                    continue
+                if not P.isabs(value) and not cwd_known:
+                    return ("ask", f"実行ディレクトリが確定できないため相対パスの書き込みは確認が必要: {p[:200]}")
+                absolute = value if P.isabs(value) else P.join(cwd, value)
+                r = check_edit(absolute)
+                if r:
+                    return r
+                if name in PS_MOVE and _protected_ancestor(P.realpath(absolute)):
+                    return ("ask", f"保護パスを含むディレクトリの移動・権限変更: {absolute}")
+                if recursive and name in PS_RECURSIVE_READ:
+                    r = secret_access(value, cwd, contains_secret)
+                    if r:
+                        return r
+            continue
+        if name in PS_RECURSIVE_READ and ("recurse" in names or "r" in names):
+            for p in paths:
+                r = secret_access(_ps_expand(p) or p, cwd, contains_secret)
+                if r:
+                    return r
+            continue
+        # 外部コマンド（git・aws・python・install.py・認証更新スクリプト等）は Bash の判定を使う
+        if not re.fullmatch(r"[a-z]+-[a-z]+", name):
+            r = _ps_as_bash(argv, cwd, cwd_known)
+            if r:
+                return r
+    if decisions:
+        return decisions[0]
+    # .NET の削除・書き込み（[IO.File]::Delete 等）
+    if PS_DOTNET_DELETE_RE.search(cmd):
+        return ("ask", "削除を伴う可能性のある操作（.NET API）")
+    if PS_DOTNET_WRITE_RE.search(cmd) and any(w in _norm_text(cmd) for w in PROTECTED_WRITE_WORDS):
+        return ("ask", "ガード設定/認証関連ファイルの変更を含むコマンド（.NET API）")
+    # 文字列としての保護語＋書き込み（変数経由のパス等の取りこぼしを補う）
+    for seg in re.split(r"[;\n|]", cmd):
+        if any(w in _norm_text(seg) for w in PROTECTED_WRITE_WORDS) and PS_WRITE_TEXT_RE.search(seg):
+            return ("ask", "ガード設定/認証関連ファイルの変更を含むコマンド")
+    return None
+
+
 def check_edit(path):
     # 相対パスはプロセスの cwd（main() で hook 入力の cwd に移動済み）基準で解釈する
-    p = os.path.realpath(os.path.expanduser(path or ""))
-    lexical = os.path.abspath(os.path.expanduser(path or ""))
-    if p.startswith(os.path.join(HOME, ".aws/")):
+    p = P.realpath(P.expanduser(path or ""))
+    lexical = P.abspath(P.expanduser(path or ""))
+    if p.startswith(P.join(HOME, ".aws/")):
         return ("deny", "~/.aws 配下の編集は禁止")
     # どのプロジェクトでも .claude/settings.json・settings.local.json（権限・hook 設定）は承認対象
     if any(re.search(r"/\.claude/settings[^/]*$", v) for v in (p, lexical)):
@@ -1868,7 +2312,8 @@ def check_mcp_input(tool_input):
                 return ("ask", "MCP 引数が多すぎるため確認が必要")
             # パス形式の値（file:// を含む）は実体パスでも判定する
             path = re.sub(r"^file://", "", value)
-            if path.startswith(("/", "~", "$HOME")) and len(path) < 4096 and not any(c.isspace() for c in path):
+            looks_path = path.startswith(("/", "~", "$HOME")) or (WINDOWS and re.match(r"[A-Za-z]:[\\/]", path))
+            if looks_path and len(path) < 4096 and not any(c.isspace() for c in path):
                 r = secret_access(path, os.getcwd(), is_secret)
                 if r:
                     return r
@@ -1890,7 +2335,7 @@ def main():
     if data.get("cwd"):
         os.chdir(data["cwd"])
         # Bash の相対パス書き込みは hook 入力の cwd（字句パス）と移動後の実体パスの両方で解釈する
-        write_state = WriteState([os.getcwd()] + ([data["cwd"]] if os.path.isabs(data["cwd"]) else []))
+        write_state = WriteState([os.getcwd()] + ([data["cwd"]] if P.isabs(data["cwd"]) else []))
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
     # cross-check・prune-memory が起動した Codex は道具方針を渡す。監視の事後停止より前に実行自体を拒否する。
@@ -1903,6 +2348,8 @@ def main():
     r = None
     if tool == "Bash":
         r = check_bash(ti.get("command", ""), write_state=write_state)
+    elif tool == "PowerShell":
+        r = check_powershell(ti.get("command", ""), cwd=os.getcwd() if data.get("cwd") else None)
     elif tool in ("Write", "Edit", "NotebookEdit", "MultiEdit"):
         r = check_edit(ti.get("file_path") or ti.get("notebook_path"))
     elif tool == "Read":
@@ -1915,12 +2362,12 @@ def main():
         patch = ti.get("command", "")
         for operation, path in re.findall(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$", patch, re.M):
             # キャッシュ削除だけを例外とし、通常の追加・更新・移動は保護する。
-            if operation == "Delete File" and is_python_cache(path, os.getcwd()) and os.path.isfile(path):
+            if operation == "Delete File" and is_python_cache(path, os.getcwd()) and P.isfile(path):
                 continue
             r = check_edit(path)
             if r:
                 break
-            if operation == "Delete File" and not is_temp(os.path.abspath(path)):
+            if operation == "Delete File" and not is_temp(P.abspath(path)):
                 r = ("ask", "一時ディレクトリ外のファイル削除")
                 break
     # Codex は MCP サーバー名の英数字・_ 以外を _ に正規化する（aws-api → aws_api）
@@ -1935,7 +2382,7 @@ def main():
         r = check_mcp_input(ti)
     if r:
         out(*r)
-    signal.alarm(0)
+    _stop_timer()
     sys.exit(0)
 
 
@@ -1943,13 +2390,41 @@ class GuardTimeout(Exception):
     """hook のタイムアウト（未判定で実行される）より前に自分で拒否するための期限切れ。"""
 
 
+TIMEOUT_REASON = "가드 검사가 제한 시간을 넘었습니다. 작업을 실행하지 않았습니다."
+
+
 def _expire(signum, frame):
     raise GuardTimeout()
 
 
+def _expire_thread():
+    """Windows 用: 判定が期限内に終わらなければ拒否を出力してプロセスごと終了する。"""
+    if not _OUT_LOCK.acquire(blocking=False):
+        return  # 判定結果を出力中
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": TIMEOUT_REASON}}, ensure_ascii=False))
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def _start_timer(seconds=GUARD_SECONDS):
+    global _TIMER
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _expire)
+        signal.alarm(seconds)
+    else:
+        _TIMER = threading.Timer(seconds, _expire_thread)
+        _TIMER.daemon = True
+        _TIMER.start()
+
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGALRM, _expire)
-    signal.alarm(GUARD_SECONDS)
+    if WINDOWS:
+        # 判定理由（韓国語・日本語）を cp932 等の既定コードページで出力すると失敗するため UTF-8 に固定する
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8")
+    _start_timer()
     try:
         main()
     except GuardTimeout:

@@ -211,6 +211,27 @@ class GuardTests(unittest.TestCase):
             with self.subTest(command=command):
                 result = g.check_bash(fill(command), cwd=P)
                 self.assertEqual(result[0] if result else None, expected)
+        # シンボリックリンク経由の検証は test_secret_paths_through_symlinks（リンクを作れない環境ではスキップ）
+        tools = [
+            ('Read', {'file_path':'~/.aws/cli/cache/fake.json'}, 'deny'),
+            ('Read', {'file_path':'~/.codex/auth.json'}, 'deny'),
+            ('Read', {'file_path':'~/.aws/config'}, None),
+            ('Grep', {'pattern':'key', 'path':'~/.aws'}, 'deny'),
+            ('Grep', {'pattern':'token', 'path':'~/.codex', 'glob':'auth.json'}, 'deny'),
+            ('Grep', {'pattern':'x', 'path':'~'}, 'deny'),
+            ('Grep', {'pattern':'x', 'path':'~/.codex/agents'}, None),
+            ('Grep', {'pattern':'token', 'path':'~/.codex/auth.json'}, 'deny'),
+            ('Grep', {'pattern':'x', 'path':'~', 'glob':'.aws/credentials'}, 'deny'),
+            ('Grep', {'pattern':'x', 'path':'<PROJECT>'}, None),
+        ]
+        for tool, tool_input, expected in tools:
+            with self.subTest(tool=tool, tool_input=tool_input):
+                result = run_guard(json.dumps({'tool_name':tool,'tool_input':tool_input}))
+                decision = json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
+                self.assertEqual(decision, expected)
+
+    @env.requires_symlinks
+    def test_secret_paths_through_symlinks(self):
         with tempfile.TemporaryDirectory() as td:
             link = Path(td) / 'auth'
             link.symlink_to(env.HOME / '.codex/auth.json')
@@ -232,24 +253,8 @@ class GuardTests(unittest.TestCase):
                 self.assertTrue(g.is_secret(str(outside / 'credentials')))
                 self.assertFalse(g.is_secret(str(home / '.aws/config')))
                 self.assertEqual(g.check_bash(f'cat {home}/.codex/auth.json')[0], 'deny')
-        tools = [
-            ('Read', {'file_path':'~/.aws/cli/cache/fake.json'}, 'deny'),
-            ('Read', {'file_path':'~/.codex/auth.json'}, 'deny'),
-            ('Read', {'file_path':'~/.aws/config'}, None),
-            ('Grep', {'pattern':'key', 'path':'~/.aws'}, 'deny'),
-            ('Grep', {'pattern':'token', 'path':'~/.codex', 'glob':'auth.json'}, 'deny'),
-            ('Grep', {'pattern':'x', 'path':'~'}, 'deny'),
-            ('Grep', {'pattern':'x', 'path':'~/.codex/agents'}, None),
-            ('Grep', {'pattern':'token', 'path':'~/.codex/auth.json'}, 'deny'),
-            ('Grep', {'pattern':'x', 'path':'~', 'glob':'.aws/credentials'}, 'deny'),
-            ('Grep', {'pattern':'x', 'path':'<PROJECT>'}, None),
-        ]
-        for tool, tool_input, expected in tools:
-            with self.subTest(tool=tool, tool_input=tool_input):
-                result = run_guard(json.dumps({'tool_name':tool,'tool_input':tool_input}))
-                decision = json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] if result.stdout else None
-                self.assertEqual(decision, expected)
 
+    @env.requires_symlinks
     def test_symlink_temp_is_not_exempt(self):
         with tempfile.TemporaryDirectory() as td:
             link = Path(td) / 'escape'
@@ -503,14 +508,15 @@ class GuardConfigTests(unittest.TestCase):
                 result = g.check_bash(command, cwd=home)
                 self.assertEqual(result[0] if result else None, expected)
         # 名前を変えたリンク経由も実体パスで判定する
-        root = Path(tempfile.mkdtemp(prefix='harness-', dir=env.HOME.parent))
-        (root / 'install').mkdir()
-        (root / 'install/install.py').write_text('')
-        (root / 'runner').symlink_to(root / 'install/install.py')
-        linked = env.load(env.isolated_guard(env.config(harness_home=str(root))), 'guard_linked')
-        self.assertEqual(linked.check_bash(f'python3 {root}/runner --apply', cwd='/')[0], 'ask')
-        self.assertEqual(linked.check_bash(f'python3 {root}/runner --a', cwd='/')[0], 'ask')
-        self.assertIsNone(linked.check_bash(f'python3 {root}/runner', cwd='/'))
+        if env.SYMLINKS:
+            root = Path(tempfile.mkdtemp(prefix='harness-', dir=env.HOME.parent))
+            (root / 'install').mkdir()
+            (root / 'install/install.py').write_text('')
+            (root / 'runner').symlink_to(root / 'install/install.py')
+            linked = env.load(env.isolated_guard(env.config(harness_home=str(root))), 'guard_linked')
+            self.assertEqual(linked.check_bash(f'python3 {root}/runner --apply', cwd='/')[0], 'ask')
+            self.assertEqual(linked.check_bash(f'python3 {root}/runner --a', cwd='/')[0], 'ask')
+            self.assertIsNone(linked.check_bash(f'python3 {root}/runner', cwd='/'))
         # Codex は承認要求を拒否に変換する
         output = self.decide(env.GUARD, 'Bash', {'command': f'python3 {home}/install/install.py --apply'}, 'codex')
         self.assertEqual(output['permissionDecision'], 'deny')
@@ -689,6 +695,7 @@ class RelativeWriteTests(unittest.TestCase):
             ("echo '<<X'\necho x > hooks/guard.py\nX", 'ask'),
         ], str(self.home))
 
+    @env.requires_symlinks
     def test_symlinks_are_resolved(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td).resolve()
@@ -1128,5 +1135,121 @@ class UsageTests(unittest.TestCase):
             self.assertEqual(u.scan(path,state,'claude')['output'],5)
             path.write_text('')
             self.assertEqual(u.scan(path,state,'claude')['output'],0)
+
+
+class PowerShellTests(unittest.TestCase):
+    """Windows の PowerShell 道具の判定（check_powershell）。パスは隔離環境の値を使うためどの OS でも実行する。"""
+
+    def check(self, cases, cwd=P):
+        for command, expected in cases:
+            with self.subTest(command=command):
+                result = g.check_powershell(fill(command), cwd=cwd)
+                self.assertEqual(result[0] if result else None, expected, result)
+
+    def test_secret_reads_are_denied(self):
+        self.check([
+            ('Get-Content ~/.aws/credentials', 'deny'),
+            ('Get-Content ~\\.aws\\credentials', 'deny'),
+            ('gc "$HOME\\.codex\\auth.json"', 'deny'),
+            ("Copy-Item -Path '<HOME>/.aws/credentials' -Destination C:/tmp/x", 'deny'),
+            ('type <HOME>/.claude/.credentials.json', 'deny'),
+            ('Select-String -Path <HOME> -Pattern token -Recurse', 'deny'),
+            ('Get-Content ~/.aws/config', None),
+            ('Get-Content <PROJECT>/README.md', None),
+        ])
+
+    def test_deletes_need_approval_outside_temp(self):
+        temp = tempfile.mkdtemp(prefix='ps-delete-')
+        self.addCleanup(lambda: os.path.isdir(temp) and os.rmdir(temp))
+        self.check([
+            ('Remove-Item -Recurse -Force <PROJECT>/build', 'ask'),
+            ('rm <PROJECT>/fake.txt', 'ask'),
+            ('del <PROJECT>/fake.txt', 'ask'),
+            ('Remove-Item -Path $SomeVar', 'ask'),
+            ('Get-ChildItem *.log | Remove-Item', 'ask'),
+            ('[System.IO.File]::Delete("<PROJECT>/a.txt")', 'ask'),
+            (f'Remove-Item -Recurse -Force "{temp}/x"', None),
+            (f"Remove-Item '{temp}/x' -ErrorAction SilentlyContinue", None),  # 既知の値引数は読み飛ばす
+            (f"Remove-Item '{temp}/x' -Unknown Value", 'ask'),  # 未知の引数の値はパス候補（安全側）
+        ])
+
+    def test_protected_writes_need_approval(self):
+        self.check([
+            ('Set-Content -Path <HARNESS>/hooks/guard.py -Value x', 'ask'),
+            ("'x' | Out-File -FilePath <HOME>/.claude/settings.json", 'ask'),
+            ('echo x > <HARNESS>/hooks/guard.py', 'ask'),
+            ('echo x >> <HOME>/.claude/hooks/guard.py', 'ask'),
+            ('Copy-Item a.txt <HARNESS>/install/install.py', 'ask'),
+            ('Move-Item <HARNESS>/hooks <PROJECT>/old', 'ask'),
+            ('Add-Content <PROJECT>/.claude/settings.local.json x', 'ask'),
+            ('[IO.File]::WriteAllText("<HARNESS>/config.local.json", "x")', 'ask'),
+            ('Set-Location <HARNESS>/hooks; Set-Content guard.py x', 'ask'),
+            ('Set-Location $Dir; Set-Content notes.md x', 'ask'),
+            ('Set-Content -Path <PROJECT>/notes.md -Value x', None),
+            ('echo x > $null', None),
+            ('Get-ChildItem <HARNESS>/hooks', None),
+        ])
+
+    def test_aws_and_credentials(self):
+        self.check([
+            ('aws s3api delete-bucket --bucket fake', 'deny'),
+            ('aws.exe ec2 describe-instances', None),
+            ('aws ec2 describe-instances --profile default', 'deny'),
+            ("$env:AWS_PROFILE = 'default'", 'deny'),
+            ("$env:AWS_PROFILE = '<PROFILE>'", None),
+            ("$env:AWS_ACCESS_KEY_ID = 'AKIAEXAMPLE'", 'deny'),
+            ('Remove-Item env:AWS_PROFILE', 'deny'),
+            ("[Environment]::SetEnvironmentVariable('AWS_PROFILE', 'x')", 'deny'),
+            ('cdk deploy', 'deny'),
+        ])
+
+    def test_dynamic_and_nested_execution(self):
+        self.check([
+            ('Invoke-Expression "rm x"', 'ask'),
+            ('iex $code', 'ask'),
+            ('powershell -EncodedCommand ZQBjAGgAbwA=', 'ask'),
+            ('pwsh -File script.ps1', 'ask'),
+            ('powershell -Command "Remove-Item <PROJECT>/x"', 'ask'),
+            ('powershell -NoProfile -Command "Get-Content ~/.aws/credentials"', 'deny'),
+            ('cmd /c del x', 'ask'),
+            ("bash -c 'rm <PROJECT>/fake'", 'ask'),
+            ('Start-Process notepad', 'ask'),
+            ('. ./profile.ps1', 'ask'),
+        ])
+
+    def test_native_commands_use_bash_rules(self):
+        self.check([
+            ('git status', None),
+            ('git -C <HARNESS> reset --hard', 'ask'),
+            ('python -m unittest discover -s hooks/tests -t hooks/tests', None),
+            ('python.exe <HARNESS>/install/install.py --apply', 'ask'),
+            ('& "C:/Program Files/Git/cmd/git.exe" log --oneline -5', None),
+            ('Get-ChildItem; git diff --stat', None),
+        ])
+
+    def test_dispatch_through_main(self):
+        # 子プロセスの main() が PowerShell 道具を判定し、韓国語の理由を含む JSON を返す
+        result = run_guard(json.dumps({'tool_name': 'PowerShell', 'tool_input': {'command': 'Get-Content ~/.aws/credentials'}}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        result = run_guard(json.dumps({'tool_name': 'PowerShell', 'tool_input': {'command': 'Get-ChildItem'}}))
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, ''))
+
+
+class WindowsPathTests(unittest.TestCase):
+    """Windows 形式のパス（\\ 区切り・大文字小文字・Git Bash の /c/...）でも保護判定が効くこと。"""
+
+    @unittest.skipUnless(env.WINDOWS, 'Windows のパス表記の検証')
+    def test_backslash_case_and_msys_paths(self):
+        home = str(env.HOME)
+        self.assertEqual(g.check_edit(home + '\\.claude\\hooks\\guard.py')[0], 'ask')
+        self.assertEqual(g.check_edit(home.upper() + '\\.CLAUDE\\settings.json')[0], 'ask')
+        self.assertEqual(g.check_edit(home + '\\.aws\\config')[0], 'deny')
+        msys = '/' + home[0].lower() + home[2:].replace('\\', '/')
+        self.assertEqual(g.check_bash(f'cat {msys}/.aws/credentials')[0], 'deny')
+        self.assertEqual(g.check_bash(f'echo x > {msys}/.claude/settings.json')[0], 'ask')
+        self.assertTrue(g.is_temp(os.path.join(tempfile.gettempdir(), 'x')))
+        self.assertEqual(g.secret_access(home + '\\.AWS\\Credentials', P, g.is_secret)[0], 'deny')
+
 
 if __name__=='__main__': unittest.main()
