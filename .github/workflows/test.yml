@@ -25,9 +25,19 @@ jobs:
         shell: bash
         run: |
           set -u
+          suites="hooks/tests install/tests tools/tests tools/investigation tools/task_metrics tools/aws"
+          # cross-check は macOS 専用（/bin/zsh とファイル作成時刻を前提にする。Windows 対応は 2 段階目）
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            suites="$suites skills/cross-check/tests"
+          fi
+          # Mac/Linux のランナーは作業ディレクトリが .../work/... にあり、作業ルートの検査（/work/ を含まないこと）と
+          # 衝突するため、パスに work を含まない一時ディレクトリへ複製して実行する
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            cp -R . /tmp/ai-harness
+            cd /tmp/ai-harness
+          fi
           status=0
-          for suite in hooks/tests install/tests skills/cross-check/tests tools/tests \
-                       tools/investigation tools/task_metrics tools/aws; do
+          for suite in $suites; do
             echo "::group::$suite"
             python -m unittest discover -s "$suite" -t "$suite" || status=1
             echo "::endgroup::"

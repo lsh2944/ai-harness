@@ -17,15 +17,71 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 MAX_HASH_BYTES = 16 * 1024 * 1024
 MAX_GIT_BYTES = 16 * 1024 * 1024
 GIT_TIMEOUT = 15
+WINDOWS = os.name == 'nt'
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _save_logs(buffers, error):
+    logs = Path(tempfile.mkdtemp(prefix='repo-context-git-error-'))
+    for name, data in buffers.items():
+        (logs / (name + '.log')).write_bytes(data)
+    return ValueError(f'{error}; captured output: {logs}')
+
+
+def _git_windows(command, env):
+    """Windows 版の git 実行。selectors はパイプに使えず killpg もないため、読み取りはスレッド、
+    停止は taskkill /T（子孫ごと）で行う。時間・出力量の上限は POSIX 版と同じ。"""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    lock, exceeded = threading.Lock(), threading.Event()
+
+    def reader(stream, name):
+        while not exceeded.is_set():
+            chunk = stream.read1(65536)
+            if not chunk:
+                return
+            with lock:
+                buffers[name].extend(chunk)
+                if sum(map(len, buffers.values())) > MAX_GIT_BYTES:
+                    exceeded.set()
+
+    threads = [threading.Thread(target=reader, args=(process.stdout, 'stdout'), daemon=True),
+               threading.Thread(target=reader, args=(process.stderr, 'stderr'), daemon=True)]
+    for thread in threads:
+        thread.start()
+    started = time.monotonic()
+    try:
+        while any(t.is_alive() for t in threads) or process.poll() is None:
+            if exceeded.is_set():
+                raise ValueError('Git stdout/stderr exceeded the capture limit; collection stopped')
+            if time.monotonic() - started >= GIT_TIMEOUT:
+                raise ValueError('Git timed out')
+            time.sleep(0.02)
+        if exceeded.is_set():
+            raise ValueError('Git stdout/stderr exceeded the capture limit; collection stopped')
+        with lock:
+            return subprocess.CompletedProcess(command, process.wait(), bytes(buffers['stdout']), bytes(buffers['stderr']))
+    except (OSError, ValueError) as error:
+        with lock:
+            raise _save_logs(buffers, error) from error
+    finally:
+        if process.poll() is None:
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(process.pid)], capture_output=True)
+        process.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+        process.stdout.close()
+        process.stderr.close()
 
 
 def git(path, *args):
@@ -33,6 +89,8 @@ def git(path, *args):
     env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C')
     command = ['git', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
                '-C', str(path), *args]
+    if WINDOWS:
+        return _git_windows(command, env)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                env=env, start_new_session=True)
     buffers = {'stdout': bytearray(), 'stderr': bytearray()}
@@ -54,10 +112,7 @@ def git(path, *args):
                         raise ValueError('Git stdout/stderr exceeded the capture limit; collection stopped')
             return subprocess.CompletedProcess(command, process.wait(), bytes(buffers['stdout']), bytes(buffers['stderr']))
         except (OSError, ValueError) as error:
-            logs = Path(tempfile.mkdtemp(prefix='repo-context-git-error-'))
-            for name, data in buffers.items():
-                (logs / (name + '.log')).write_bytes(data)
-            raise ValueError(f'{error}; captured output: {logs}') from error
+            raise _save_logs(buffers, error) from error
         finally:
             # Also stop descendants retaining output pipes, including on interruption.
             try:
@@ -182,7 +237,8 @@ def checked_hash(path):
             digest.update(chunk)
         after = os.fstat(source.fileno())
         current = os.lstat(resolved)
-        identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        # Windows の st_ctime は fstat と lstat で意味が揃わない（作成時刻・変更時刻）ため比較に使わない
+        identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, None if WINDOWS else s.st_ctime_ns)
         if identity(before) != identity(after) or identity(after) != identity(current):
             raise ValueError('File changed while hashing; no reliable digest')
     return digest.hexdigest()

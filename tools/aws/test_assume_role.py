@@ -61,7 +61,7 @@ class ConfigTests(unittest.TestCase):
                 patch.object(ar, 'assume_role', side_effect=AssertionError('must not call AWS')), \
                 patch('sys.stderr', stderr):
             self.assertEqual(ar.main(), 1)
-        self.assertIn('/nonexistent/config.json', stderr.getvalue())
+        self.assertIn(str(Path('/nonexistent/config.json')), stderr.getvalue())  # Windows は \ 区切りで表示される
         self.assertEqual(ar.DEFAULT_CONFIG, Path(ar.__file__).resolve().parents[2] / 'config.local.json')
 
     def test_update_profile_keeps_other_sections(self):

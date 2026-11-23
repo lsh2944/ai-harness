@@ -66,7 +66,8 @@ class RepoContextTests(unittest.TestCase):
         p.write_text('version = 2\n')
         self.command('add', 'main.py')
         p.write_text('version = 3\n')
-        u = self.repo / 'new file\nname.py'
+        # Windows はファイル名に改行を使えない（空白・改行の保持は POSIX で検証する）
+        u = self.repo / ('new file name.py' if os.name == 'nt' else 'new file\nname.py')
         u.write_text('new = True\n')
         report = context.collect([self.repo], [u], limit=0)
         changes = report['repositories'][0]['changes']
@@ -129,8 +130,13 @@ class RepoContextTests(unittest.TestCase):
         named = self.repo / '.env.local'
         named.write_text('dummy')
         linked = self.repo / 'linked.py'
-        linked.symlink_to(ordinary)
-        for p in (secret, named, linked):
+        targets = [secret, named]
+        try:
+            linked.symlink_to(ordinary)
+            targets.append(linked)
+        except OSError:
+            pass  # シンボリックリンクを作れない環境（Windows の権限不足）ではリンクの検証を省く
+        for p in targets:
             with self.subTest(p=p), patch.object(context.os, 'open', side_effect=AssertionError('must reject before opening')):
                 with self.assertRaises(ValueError):
                     context.checked_hash(p)
@@ -149,14 +155,17 @@ class RepoContextTests(unittest.TestCase):
             self.assertEqual(context.collect([self.repo])['status'], 'INCOMPLETE')
 
     def test_cli_requires_selected_files_for_hash(self):
-        result = subprocess.run(['python3', str(SCRIPT), '--hash'], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(SCRIPT), '--hash'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn('--hash requires', result.stderr)
 
     def test_symlink_cycle_is_incomplete(self):
         a, b = self.repo / 'a.py', self.repo / 'b.py'
-        a.symlink_to(b)
-        b.symlink_to(a)
+        try:
+            a.symlink_to(b)
+            b.symlink_to(a)
+        except OSError:
+            self.skipTest('シンボリックリンクを作成できない環境（Windows の権限不足）')
         report = context.collect([self.repo], [a], True)
         self.assertEqual(report['status'], 'INCOMPLETE')
         self.assertTrue(report['selected_files'][0]['errors'])

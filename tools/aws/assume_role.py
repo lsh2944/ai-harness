@@ -2,7 +2,10 @@
 """Refresh the shared AWS profile without exposing credentials or MFA in argv."""
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows（認証情報の書き込みは未対応。save_credentials が案内して止まる）
+    fcntl = None
 import getpass
 import json
 import os
@@ -132,6 +135,9 @@ def update_profile(raw, credentials):
 
 
 def save_credentials(credentials):
+    if fcntl is None:
+        # dir_fd・O_NOFOLLOW・flock を前提にした書き込みのため、Windows ではまだ使えない（何も書かない）
+        raise SystemExit("assume_role.py の認証情報の書き込みは Windows では未対応です（Mac/Linux で実行してください）。")
     directory = Path.home() / ".aws"
     try:
         directory.mkdir(mode=0o700)
