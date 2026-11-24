@@ -485,6 +485,13 @@ class PolicyTests(Base):
 
 
 class RunnerTerminationTests(Base):
+    def tearDown(self):
+        # stale() が addCleanup で登録したプロセス停止を、一時ディレクトリ削除より先に実行する。
+        # 既定順序（tearDown → doCleanups）だと生存中の偽 Codex が削除中に argv.jsonl を作り、
+        # rmtree が ENOTEMPTY（Errno 66）で失敗することがある。
+        self.doCleanups()
+        super().tearDown()
+
     def stale(self, sid, command):
         process = fx.subprocess_popen(command)
         self.addCleanup(fx.kill_group, process)
