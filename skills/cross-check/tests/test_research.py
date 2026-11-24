@@ -57,6 +57,18 @@ class ProposalResearchTests(ResearchBase):
         output, code = self.freeze_claude(sid, proposal)
         self.assertEqual((output['status'], code), ('ok', 0), output)
 
+    def test_outside_project_inference_paths_are_not_one_sided_files(self):
+        # 推論根拠が作業ルート外の標準ライブラリを指しても、公開差分の片側ファイル一覧に入れない。
+        sid = self.proposed()
+        proposal = self.env.claude_proposal(sid)
+        proposal['evidence'].append({'id': 'E8', 'kind': 'inference', 'ref': '/usr/lib/python3/tempfile.py:L1-L2',
+                                     'observation': 'stdlib reading'})
+        self.assertEqual(self.freeze_claude(sid, proposal)[1], 0)
+        self.env.ok('reveal', '--session', sid)
+        diff = json.loads((self.env.artifacts / sid / 'artifacts/reveal/diff.json').read_text())
+        self.assertNotIn('/usr/lib/python3/tempfile.py', diff['one_sided']['claude_only'])
+        self.assertEqual(diff['one_sided']['codex_only'], ['src/other.py'])
+
     def test_claude_web_evidence_without_single_url_is_rejected(self):
         sid = self.proposed()
         proposal = self.env.claude_proposal(sid)

@@ -883,6 +883,8 @@ class LinkTests(Base):
         counts = {'brief': 3, 'scope': 1, 'index': 1}
         cases = {'remote/src/a.ts:L1-L5': 'linked', f'{co.PROJECT}/remote/src/a.ts:L2': 'linked',
                  'other/b.ts:L1': 'unbacked', 'https://example.com/doc': 'linked', 'https://example.com/x': 'unbacked',
+                 # 文書内アンカー付きでも同じページを開いていれば連結。別ページのアンカーは未連結のまま。
+                 'https://example.com/doc#section-2': 'linked', 'https://example.com/x#doc': 'unbacked',
                  'brief:L3': 'input', 'brief:L4': 'unbacked', 'context7 resolve': 'linked', 'X1': 'linked', 'X9': 'unbacked'}
         for ref, expected in cases.items():
             with self.subTest(ref=ref):

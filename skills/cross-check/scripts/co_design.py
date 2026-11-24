@@ -1611,7 +1611,11 @@ def link_ref_detail(ref, tools, line_counts, known_ids=()):
         return ('linked', [], 'mention') if ref in known_ids else ('unbacked', [], None)
     if ref.startswith(('http://', 'https://')):
         url = ref.rstrip('/')
-        ids = [t['item_id'] for t in tools if url in t.get('text', '') or url in t.get('output', '')]
+        # 文書内アンカー（#節名）付きの引用は、道具記録にアンカーなしの URL しか残らないことがある（2026-11-24 実測）。
+        # 同じページなので、アンカーを除いた URL でも照合する。
+        candidates = {url, url.split('#', 1)[0].rstrip('/')} - {''}
+        ids = [t['item_id'] for t in tools
+               if any(c in t.get('text', '') or c in t.get('output', '') for c in candidates)]
         return ('linked', ids, 'mention') if ids else ('unbacked', [], None)
     match = file_ref(ref)
     if match:
@@ -3148,6 +3152,9 @@ def build_diff(session, codex_links, version_now):
             mismatch.append({'side': 'codex', 'path': path, 'captured': captured, 'current': current})
         if path in claude_files and claude_files[path] != captured:
             mismatch.append({'side': 'both', 'path': path, 'captured_claude': claude_files[path], 'captured_codex': captured})
+    # 作業ルート外の絶対パス（推論根拠が参照した標準ライブラリなど）は照合対象にならないので片側一覧に入れない。
+    claude_paths = {p for p in claude_paths if not p.startswith('/')}
+    codex_paths = {p for p in codex_paths if not p.startswith('/')}
     return {'one_sided': {'claude_only': sorted(claude_paths - codex_paths), 'codex_only': sorted(codex_paths - claude_paths)},
             'hash_mismatch': mismatch,
             'unbacked_codex': [{'id': l['id'], 'ref': l['ref']} for l in codex_links['links'] if l['link'] == 'unbacked'],
