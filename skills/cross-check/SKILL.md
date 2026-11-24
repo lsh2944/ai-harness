@@ -2,7 +2,7 @@
 name: cross-check
 description: 사용자가 요청한 설계를 Claude와 Codex가 각자 조사해 공동 설계·토론하거나(기본), 기존 설계·테스트 시나리오·구현 변경을 교차검증한다. 수동 호출 전용.
 disable-model-invocation: true
-argument-hint: "[검토할 내용] [--review | --frozen-critique | --test-plan | --code-review]"
+argument-hint: "[검토할 내용] [--review | --frozen-critique | --test-plan | --code-review] [--no-web]"
 ---
 
 # 수동 교차검증·공동 설계
@@ -32,7 +32,7 @@ Claude Code가 근거 준비·비교·보고를 맡고 Codex CLI가 설계·검�
 | `--code-review` | [구현 리뷰](references/code-review.md) | `cross_check.py --mode code-review` / 1회 |
 | `independent` | 없음(옛 독립 설계 옵션, 폐기) | 폐기됐다고 안내하고 실행하지 않는다. 다른 모드로 자동 전환하지 않고 사용자가 고르게 한다 |
 
-선택한 모드의 참조만 읽는다. 옵션은 함께 사용하지 않는다. 여러 종류를 요청하면 자동으로 호출을 늘리지 말고 우선 검토할 범위를 정한다. 자연어 요청은 "검토만"·"확인만"이면 `--review`, 테스트 시나리오나 구현 리뷰를 명시하면 해당 모드, 그 외에는 debate로 처리한다.
+선택한 모드의 참조만 읽는다. 모드 옵션은 함께 사용하지 않는다. 예외로 `--no-web`은 debate(옵션 없음·`--frozen-critique`)와만 함께 쓰며, debate 기본값인 외부 조사(질문 시점의 최신 동향·일반 구현 방식·관련 논문 웹 조사)를 끈다. 단방향 모드에는 외부 조사가 없으므로 `--no-web`을 붙여도 동작이 바뀌지 않는다고 안내한다. 여러 종류를 요청하면 자동으로 호출을 늘리지 말고 우선 검토할 범위를 정한다. 자연어 요청은 "검토만"·"확인만"이면 `--review`, 테스트 시나리오나 구현 리뷰를 명시하면 해당 모드, 그 외에는 debate로 처리한다.
 
 **진입 직후 조사 순서:** 먼저 모드를 구분한다. 옵션 없음·`--frozen-critique`는 아래 단방향 공통 절차를 적용하지 않고 [debate P0 → P1-a → P1-b](references/debate.md)를 따른다. P0 준비는 사용자 제공 사실·규칙·이미 알려진 경로와 메타데이터만으로 중립 입력을 만드는 일이다. 필수 AGENTS·스킬·스키마 읽기와 경로 존재·브랜치/커밋·변경 파일명/상태 확인은 허용하지만, 메인은 P2 공개 전까지 대상 코드·테스트·관련 diff/로그·구현 문서 본문 조사, 외부 조사, 메인이 직접 쓰는 Claude 설계 초안 작성을 하지 않는다(architect 응답의 capture→prepare→freeze는 P1-b 절차다). 조사 에이전트는 `architect-prompt` 위임문을 받은 새 architect 1개만 Codex 최초 proposal과 동시에 시작한다. 범위 확정에 내용 조사가 필요한 모호함은 먼저 사용자에게 질문한다. 기존 컨텍스트에 관련 조사·결론이 있으면 그 이력을 숨기지 않고, P1-b의 새 architect에 중립 입력만 전달해 격리한다. 과거의 무오염을 주장하거나 파일을 새로 만들어 순서 위반을 감추지 않는다. 이 절차와 완료 검사는 Claude의 Read/Bash를 도구 수준에서 차단하지는 못한다. `--review`·`--test-plan`·`--code-review`는 기존대로 다음 공통 절차에서 근거를 먼저 조사한다.
 
@@ -53,6 +53,6 @@ Claude Code가 근거 준비·비교·보고를 맡고 Codex CLI가 설계·검�
 
 - 공통 절차 모드는 호출당 기본 600초, packet 64KiB, 결과 128KiB, 실행 로그 8MiB다. 큰 근거는 잘라내지 말고 쟁점 분할을 제안한다. 제한 변경은 사용자 요청/범위를 근거로 명시하며 토큰 예산·추론 수준을 몰래 낮추지 않는다. debate의 한도는 [공동 설계 토론](references/debate.md)을 따른다.
 - **debate를 제외한 모드에서는** Codex에 packet 전체를 주고 도구 사용을 금지한다. read-only sandbox는 읽기 접근 격리를 보장하지 않는다. debate와 같은 도구 비활성화 `-c` 키(정의는 `cross_check.py`의 `DISABLE_CONFIG` 한 곳)에 셸 비활성화(`features.shell_tool=false`, `SINGLE_CALL_DISABLE`)만 더해 넘기고, 실행 중 0.1초 간격으로 events.jsonl·stderr.log를 감시해 `reasoning`·`agent_message` 이외의 item(도구 호출 포함), 허용 목록 밖의 상위 이벤트, `error`·`turn.failed`, stderr의 `Command blocked by PreToolUse hook`이 보이면 즉시 프로세스 그룹을 종료하고 `INCOMPLETE`로 처리한다(종료 후 검사도 유지). Codex가 저장소를 직접 조사하거나 테스트했다고 보고하지 않는다. debate는 범위 명세 안에서 Codex 도구 사용을 허용하고 실시간 감시로 위반 시 정지한다.
-- debate 결과는 `finalize`가 만드는 `artifacts/report.md`의 구조(1~10절)를 따라 보고하며, 채팅에는 최초 제안 비교표·쟁점별 토론·결론 표·사용자 결정/미해결을 간결하게 보여주고 상세 보고서 경로를 연결한다([공동 설계 토론](references/debate.md)의 최종 보고 형식).
+- debate 결과는 `finalize`가 만드는 `artifacts/report.md`의 구조(1~11절, 11절은 외부 조사)를 따라 보고하며, 채팅에는 최초 제안 비교표·쟁점별 토론·결론 표·외부 조사(동향·일반 기술·논문 링크와 링크 확인 결과)·사용자 결정/미해결을 간결하게 보여주고 상세 보고서 경로를 연결한다([공동 설계 토론](references/debate.md)의 최종 보고 형식).
 - 첫 훅·permission·보호정책 거부부터 자식과 메인 모두 현재 workflow를 중단하고 사용자에게 보고한다. 명령·도구·경로 변경이나 메인의 대리 실행으로 재시도하지 않는다. 상세 중단 범위와 비보호 입력 오류 구분은 [거부 처리](references/debate.md)를 따른다. 인증 오류·초과·잘못된 모델 결과도 보고하고 멈추며 자동 재시도·우회·무제한 토론을 하지 않는다. 추가 검토는 사용자 요청이나 실제 새 근거가 있을 때만 한다.
 - 호출별 `summary.json`에 usage·시간·상태가 남는다. 각 Codex 호출을 [task-metrics](../task-metrics/SKILL.md)의 summary 가져오기로 한 번씩 기록한다(debate는 호출마다 `--workflow debate`, 세션 요약 `session_summary.json`은 가져오지 않는다). 실패해도 실제 생성된 summary가 있으면 상태·관측값만 기록한다. 측정 실패는 검토 판정과 구분해 알리고 자동 재시도하지 않는다. Codex 호출 usage는 Claude나 전체 작업/계정 사용량이 아니며 교차검증의 토큰 절약을 보장하지 않는다.

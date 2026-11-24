@@ -20,8 +20,17 @@
     "evidence": [
       {"id": "local:source_a", "kind": "file", "ref": "src/file.py:L1-L2", "observation": "해당 원문의 관찰 내용"},
       {"id": "E1", "kind": "brief", "ref": "brief:L1", "observation": "요구사항 원문에 근거한 내용"},
-      {"id": "E2", "kind": "inference", "ref": "src/file.py:L1-L2", "observation": "원문에서 추론한 내용이며 직접 검증하지 않음"}
+      {"id": "E2", "kind": "inference", "ref": "src/file.py:L1-L2", "observation": "원문에서 추론한 내용이며 직접 검증하지 않음"},
+      {"id": "E3", "kind": "web", "ref": "https://example.org/actual-page-you-opened", "observation": "실제로 연 페이지에서 확인한 내용"}
     ],
+    "research": {
+      "question_date": "architect_prompt의 question_date 값 그대로",
+      "web_used": true,
+      "trends": [{"summary": "질문 기준일 무렵의 최신 동향 요점", "url": "https://example.org/actual-page-you-opened"}],
+      "common_practices": [{"summary": "보통 쓰는 구현 방식·기술과 설계에 반영한 점", "url": "https://example.org/another-page"}],
+      "papers": [{"title": "논문 제목", "url": "https://arxiv.org/abs/0000.00000", "year": "2025", "relevance": "이 질문과의 관련성"}],
+      "not_applicable_reason": ""
+    },
     "open_questions": ["사용자 판단이 필요한 미정 사항"],
     "unverified": ["검증하지 못한 사항과 영향"]
   },
