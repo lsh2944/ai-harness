@@ -4653,7 +4653,8 @@ def parser():
     p = sub.add_parser('investigation-ready', help='read-only: check proposal completion without revealing it or calling a model')
     p.add_argument('--session', required=True)
     p.add_argument('--architect-prompt', action='store_true', help='return a fixed neutral architect prompt only after the existing ready checks')
-    p = sub.add_parser('architect-prompt', help='read-only: fixed neutral architect prompt right after inputs are frozen (run before the proposal call)')
+    p = sub.add_parser('architect-prompt', help='fixed neutral architect prompt right after inputs are frozen (run before the proposal call); '
+                       'like other locked commands it stops a stale running call (STOPPED) instead of returning a prompt')
     p.add_argument('--session', required=True)
     p = sub.add_parser('prune')
     p.add_argument('--apply', action='store_true',

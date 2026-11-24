@@ -10,6 +10,7 @@ import shlex
 LOCAL = re.compile(r'local:[A-Za-z][A-Za-z0-9_-]{0,63}')
 # Agent 結果の output_file は tasks/<id>.output から subagents/agent-<id>.jsonl への symlink（2026-11-20 実測）。
 AGENT_TRANSCRIPT = re.compile(r'agent-[A-Za-z0-9_-]{1,128}\.jsonl')
+AGENT_OUTPUT_NAME = re.compile(r'([A-Za-z0-9_-]{1,128})\.output')
 AGENT_OUTPUT_MAX = 32 * 1024 * 1024
 
 
@@ -21,30 +22,46 @@ def agent_message(co, agent_output):
     given = Path(agent_output)
     if not given.is_absolute():
         raise co.Refused('--agent-output must be the absolute output_file path returned by the Agent tool')
-    resolved = given.resolve(strict=True)
-    if resolved.parent.name != 'subagents' or not AGENT_TRANSCRIPT.fullmatch(resolved.name):
-        raise co.Refused('agent output must resolve to a subagents/agent-*.jsonl transcript')
-    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    # 渡された <id>.output と実体 agent-<id>.jsonl の id が一致するときだけ読む（別 agent の応答を保存しない）。
+    match = AGENT_OUTPUT_NAME.fullmatch(given.name)
+    try:
+        resolved = given.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise co.Refused('agent output path cannot be resolved') from None
+    if (match is None or resolved.parent.name != 'subagents' or not AGENT_TRANSCRIPT.fullmatch(resolved.name)
+            or resolved.name != f'agent-{match.group(1)}.jsonl'):
+        raise co.Refused('agent output must be <id>.output resolving to subagents/agent-<id>.jsonl with the same id')
+    try:
+        # FIFO 等で open が止まらないよう O_NONBLOCK（read_source と同じ）。
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise co.Refused('agent output transcript cannot be opened') from None
     try:
         info = os.fstat(fd)
         if not co.stat.S_ISREG(info.st_mode):
             raise co.Refused('agent output transcript must be a regular file')
-        if info.st_size > AGENT_OUTPUT_MAX:
-            raise co.Refused('agent output transcript is larger than 32 MiB; save the response manually and report')
-        chunks = []
-        while True:
-            chunk = os.read(fd, 1 << 20)
+        chunks, total = [], 0
+        # fstat 後に伸びても上限 +1 バイトまでしか読まない。
+        while total <= AGENT_OUTPUT_MAX:
+            chunk = os.read(fd, min(1 << 20, AGENT_OUTPUT_MAX + 1 - total))
             if not chunk:
                 break
             chunks.append(chunk)
+            total += len(chunk)
+        if total > AGENT_OUTPUT_MAX:
+            raise co.Refused('agent output transcript is larger than 32 MiB; save the response manually and report')
     finally:
         os.close(fd)
     handback = text = None
-    for line in b''.join(chunks).splitlines():
+    for number, line in enumerate(b''.join(chunks).splitlines(), 1):
+        if not line.strip():
+            continue
         try:
             entry = json.loads(line)
         except ValueError:
-            continue
+            # 壊れた行を飛ばすと直前の別応答を黙って保存しうるので推測せず拒否する。
+            raise co.Refused(f'agent output transcript line {number} is not valid JSON; do not guess, '
+                             'save the response manually and report') from None
         if not isinstance(entry, dict) or entry.get('type') != 'assistant':
             continue
         content = (entry.get('message') or {}).get('content') if isinstance(entry.get('message'), dict) else None
@@ -74,7 +91,10 @@ def capture(co, session, agent_output, output):
     if not call or not call.get('ended_at') or call.get('execution') != 'ok':
         raise co.Refused('capture requires a successfully completed Codex proposal; wait for it before saving the architect response')
     message, source = agent_message(co, agent_output)
-    data = message.encode('utf-8')
+    try:
+        data = message.encode('utf-8')
+    except UnicodeEncodeError:
+        raise co.Refused('architect message is not encodable as UTF-8; save the response manually and report') from None
     if len(data) > co.MAX_DOC * 4:
         raise co.Refused('architect message exceeds the handoff size limit; preserve it and report')
     target = co.submission_draft_target(output)
