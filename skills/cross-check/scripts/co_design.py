@@ -209,6 +209,10 @@ STRENGTH_KINDS = ('excerpt', 'mention')
 FILE_REF = re.compile(r'(?P<path>[^\s:]+):L(?P<a>\d+)(?:-L?(?P<b>\d+))?')
 EVIDENCE_ID = re.compile(r'[EX]\d{1,4}')
 ISSUE_ID = re.compile(r'[A-Z]{1,2}\d{1,4}')
+# 外部調査（最新動向・一般的な実装・論文）の URL。空白を含まない単一の http(s) URL だけを受け取る。
+WEB_URL = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
+RESEARCH_LISTS = ('trends', 'common_practices', 'papers')
+RESEARCH_CHECK_STATUS = ('verified', 'mismatch', 'unreachable', 'not-checked')
 INPUT_FILES = {'brief': 'brief.md', 'scope': 'scope.json', 'index': 'evidence_index.md'}
 
 
@@ -1849,13 +1853,44 @@ def proposal_semantics(result, side, session):
                 if side == 'claude':
                     raise SchemaError('invalid input line reference: ' + entry['ref'][:60])
                 problems.append(f'invalid input line reference in {entry["id"]}: ' + entry['ref'][:60])
-        elif side == 'claude' and entry['kind'] in ('file', 'command', 'mcp', 'web') and entry['id'] not in registered:
+        elif side == 'claude' and entry['kind'] == 'web' and entry['id'] not in registered:
+            # Web 調査の根拠は登録手段がないので、URL 形式だけ検査して未登録のまま受け取る（brief/inference と同じく台帳では引用できない）。
+            if not WEB_URL.fullmatch(entry['ref'].strip()):
+                raise SchemaError('Claude web evidence ref must be a single http(s) URL: ' + entry['id'])
+        elif side == 'claude' and entry['kind'] in ('file', 'command', 'mcp') and entry['id'] not in registered:
             raise SchemaError('Claude evidence must be registered with `evidence add`: ' + entry['id'])
     if not result['summary'].strip():
         raise SchemaError('empty summary')
     if result['status'] == 'INCOMPLETE' and not result['unverified']:
         problems.append('INCOMPLETE proposal without unverified items')
+    problems += research_semantics(result['research'], side)
     return problems
+
+
+def question_date(session):
+    """質問時点（セッション開始日、ローカル日付）。Web 調査の基準日として両側へ渡す。"""
+    return time.strftime('%Y-%m-%d', time.localtime(session['created_at']))
+
+
+def research_urls(research):
+    return [item['url'] for key in RESEARCH_LISTS for item in research[key]]
+
+
+def research_semantics(research, side):
+    """外部調査欄の形式検査。Claude 側は凍結前に直せない引き継ぎなので拒否、Codex 側は問題として残す。"""
+    errors = []
+    bad = [url for url in research_urls(research) if not WEB_URL.fullmatch(url.strip())]
+    if bad:
+        errors.append('research url must be a single http(s) URL: ' + bad[0][:80])
+    listed = any(research[key] for key in RESEARCH_LISTS)
+    if (not research['web_used'] or not listed) and not research['not_applicable_reason'].strip():
+        errors.append('research without web findings needs not_applicable_reason')
+    if listed and not research['web_used']:
+        errors.append('research lists findings although web_used is false')
+    if side == 'claude' and errors:
+        raise SchemaError(errors[0])
+    # 基準日の食い違いだけで提案全体を INCOMPLETE にしない（報告 11 節に両側の基準日をそのまま出す）。
+    return errors
 
 
 def required_responses(session, phase):
@@ -2106,7 +2141,8 @@ def _build_full_request(session, phase, compact=None):
     parts = [(DEBATE / 'prompt_common.md').read_text(encoding='utf-8'),
              (DEBATE / f'prompt_{phase}.md').read_text(encoding='utf-8'),
              f'Session: {sid}\nPhase: {phase}\nWorking root: {PROJECT}\n'
-             f'Readable session inputs directory: {art(sid) / "inputs"}\n' + ((COMPACT_NOTE if compact else 'Request format: lossless. JSON is minified; all issues are retained. @same-as references repeat exact text found in the same request.\n') if packed and phase != 'proposal' else ''),
+             f'Readable session inputs directory: {art(sid) / "inputs"}\n' + ((COMPACT_NOTE if compact else 'Request format: lossless. JSON is minified; all issues are retained. @same-as references repeat exact text found in the same request.\n') if packed and phase != 'proposal' else '')
+             + (f'Question date (research baseline, set research.question_date to this): {question_date(session)}\n' if phase == 'proposal' else ''),
              block('BRIEF (cite as brief:L<n>)', numbered(input_text(sid, 'brief'))),
              block('SCOPE (cite as scope:L<n>)', numbered(input_text(sid, 'scope'))),
              block('EVIDENCE INDEX (cite as index:L<n>)', numbered(input_text(sid, 'index')))]
@@ -3160,6 +3196,70 @@ def cmd_reveal(args):
                 'call_summaries': call_summaries(session)}, 0
 
 
+AFTER_REVEAL = ('REVEALED', 'CODEX_CRITIQUED', 'CLAUDE_CRITIQUE_FROZEN', 'DEBATED', 'SYNTHESIZED')
+
+
+def proposal_research_urls(sid):
+    """公開済みの両提案が挙げた外部調査 URL と web 根拠 URL（リンク確認の対象集合）。
+
+    公開後は両提案が必ずあるので、読めなければ黙って空にせず拒否する（Claude 提案は MAX_DOC まで許される）。
+    """
+    urls = set()
+    for name, limit in (('claude/proposal.json', MAX_DOC), ('codex/proposal.json', MAX_RESULT)):
+        try:
+            proposal = read_json_artifact(sid, name, limit)
+        except (SchemaError, OSError) as error:
+            raise Refused(f'cannot read revealed {name}: {str(error)[:80]}') from None
+        if not isinstance(proposal, dict):
+            raise Refused(f'revealed {name} is not a JSON object')
+        research = proposal.get('research')
+        if isinstance(research, dict):
+            urls.update(item.get('url', '').strip() for key in RESEARCH_LISTS for item in research.get(key, [])
+                        if isinstance(item, dict))
+        urls.update(e.get('ref', '').strip() for e in proposal.get('evidence', [])
+                    if isinstance(e, dict) and e.get('kind') == 'web')
+    return {u for u in urls if WEB_URL.fullmatch(u)}
+
+
+def cmd_research_check(args):
+    """公開後にメインが実際に開いて確かめたリンクの結果を検査して保存する（再提出で置き換え）。"""
+    sid = sid_check(args.session)
+    with locked_session(sid) as session:
+        require_state(session, *AFTER_REVEAL)
+        data = validation_candidate(sid, 'research_check.json', args.file)
+        try:
+            document = decode_json(data)
+            checks = document.get('checks') if isinstance(document, dict) and set(document) == {'checks'} else None
+            if not isinstance(checks, list) or not checks:
+                raise SchemaError('research check must be {"checks": [...]} with at least one entry')
+            known = proposal_research_urls(sid)
+            seen = set()
+            for index, entry in enumerate(checks):
+                if not isinstance(entry, dict) or set(entry) != {'url', 'status', 'observed_title', 'note'} \
+                        or not all(isinstance(entry[k], str) for k in entry):
+                    raise SchemaError(f'checks[{index}] must have string url, status, observed_title, note')
+                url = entry['url'].strip()
+                if url not in known:
+                    raise SchemaError(f'checks[{index}].url is not a research or web evidence URL of either proposal')
+                if url in seen:
+                    raise SchemaError(f'checks[{index}].url is duplicated')
+                if entry['status'] not in RESEARCH_CHECK_STATUS:
+                    raise SchemaError(f'checks[{index}].status must be one of {", ".join(RESEARCH_CHECK_STATUS)}')
+                if entry['status'] in ('verified', 'mismatch') and not entry['observed_title'].strip():
+                    raise SchemaError(f'checks[{index}].observed_title is required when the page was opened')
+                seen.add(url)
+            check_lengths(document)
+        except SchemaError as error:
+            return {'status': 'INVALID', 'error': str(error)}, 2
+        target = art(sid) / 'research_check.json'
+        preflight_validation_target(target)
+        saved = dump({'checked_at': now(), 'checks': checks})
+        write_private(target, saved)
+        counts = {status: sum(1 for c in checks if c['status'] == status) for status in RESEARCH_CHECK_STATUS}
+        return {'status': 'ok', 'path': str(target), 'sha256': sha256(saved), 'counts': counts,
+                'unchecked_urls': sorted(known - seen)}, 0
+
+
 def known_evidence(session):
     return {e['id'] for e in session['evidence']} | codex_evidence_ids(session)
 
@@ -3752,10 +3852,24 @@ def _proposal_section(title, proposal):
     return lines
 
 
+def _report_proposal(proposal):
+    """報告用の検証。research 追加前に凍結した提案は、その欄だけ任意として扱う（凍結・呼び出しの検証は現行スキーマのまま）。"""
+    if isinstance(proposal, dict) and 'research' not in proposal:
+        schema = load_schema('proposal')
+        schema['required'] = [k for k in schema['required'] if k != 'research']
+        try:
+            check_schema(proposal, schema)
+            check_lengths(proposal)
+        except SchemaError:
+            return None
+        return proposal
+    return _valid_or_none(proposal, 'proposal')
+
+
 def _initial_proposal_table(claude, codex):
     """Compare frozen proposals, never reconstruct initial positions from the final ledger."""
     def values(proposal):
-        proposal = _valid_or_none(proposal, 'proposal')
+        proposal = _report_proposal(proposal)
         if proposal is None:
             return ['(산출물 없음/유효하지 않음)'] * 6
         return [
@@ -3923,7 +4037,94 @@ def render_report(session, summary, checked):
         f'알 수 없음(관측 {summary["violations_observed"]}건)'
     lines.append(f'- 요약 누락: {summary["summaries_missing"]}건 / 위반: {violations}')
     lines.append('- 토큰은 Codex 호출의 provider 보고값이며 Claude 쪽 사용량은 포함하지 않는다.')
+    lines += _research_section(sid, claude_proposal, codex_proposal)
     return '\n'.join(lines) + '\n'
+
+
+RESEARCH_LABELS = {'trends': '최신 동향', 'common_practices': '일반적인 구현·기술', 'papers': '관련 논문'}
+CHECK_LABELS = {'verified': '확인됨', 'mismatch': '내용 불일치', 'unreachable': '열 수 없음', 'not-checked': '미확인'}
+
+
+def _research_section(sid, claude_proposal, codex_proposal):
+    """11 節: 両側の外部調査を URL で統合し、メインのリンク確認結果を並べる（番号 1〜10 は変えない）。"""
+    lines = ['', '## 11. 외부 조사(최신 동향·일반 기술·논문)']
+    research_schema = load_schema('proposal')['properties']['research']
+    researches, evidence = {}, {}
+    for name, proposal in (('Claude', claude_proposal), ('Codex', codex_proposal)):
+        proposal = proposal if isinstance(proposal, dict) else {}
+        research = proposal.get('research')
+        try:
+            check_schema(research, research_schema)
+        except SchemaError:
+            research = None
+        researches[name] = research
+        # 外部調査欄に無い web 根拠 URL も、確認結果が報告から消えないよう別表に出す。
+        evidence[name] = [e for e in proposal.get('evidence', []) if isinstance(e, dict) and e.get('kind') == 'web'
+                          and isinstance(e.get('ref'), str) and isinstance(e.get('observation'), str)]
+        if research is None:
+            missing = 'research' not in proposal
+            lines.append(f'- {name}: 조사 기록 없음(' + ('이 세션의 제안에 research 필드가 없음' if missing else 'research 형식이 유효하지 않음') + ')')
+            continue
+        used = '웹 조사함' if research['web_used'] else '웹 조사 안 함'
+        reason = research['not_applicable_reason'].strip()
+        lines.append(f'- {name}: 기준일 {_flat(research["question_date"])} / {used}'
+                     + (f' / 해당 없음 사유: {_flat(reason)}' if reason else ''))
+    # 手で壊された確認記録でも finalize を止めない。形式の合う項目だけ使う。
+    document = _artifact_or_none(sid, 'research_check.json')
+    entries = document.get('checks') if isinstance(document, dict) and isinstance(document.get('checks'), list) else []
+    status = {c['url'].strip(): c for c in entries
+              if isinstance(c, dict) and all(isinstance(c.get(k), str) for k in ('url', 'status', 'observed_title', 'note'))
+              and c['status'] in RESEARCH_CHECK_STATUS}
+
+    def checked(url):
+        check = status.get(url)
+        if not check:
+            return '미확인'
+        text = CHECK_LABELS[check['status']]
+        if check['observed_title'].strip():
+            text += f' ({_flat(check["observed_title"])})'
+        if check['note'].strip():
+            text += f' — {_flat(check["note"])}'
+        return text
+
+    def table(merged):
+        rows = ['', '| 내용 | 링크 | 제출 | 링크 확인 |', '| --- | --- | --- | --- |']
+        for url, row in merged.items():
+            sides = '양측' if len(set(row['sides'])) > 1 else row['sides'][0]
+            rows.append(f'| {_cell(" / ".join(row["texts"]))} | {_cell(url)} | {sides} | {_cell(checked(url))} |')
+        return rows
+
+    listed = set()
+    for key, label in RESEARCH_LABELS.items():
+        merged = {}
+        for name, research in researches.items():
+            for item in research[key] if research else []:
+                url = item['url'].strip()
+                if key == 'papers':
+                    meta = ', '.join(x for x in (item['year'].strip(), item['relevance'].strip()) if x)
+                    text = item['title'] + (f' ({meta})' if meta else '')
+                else:
+                    text = item['summary']
+                row = merged.setdefault(url, {'texts': [], 'sides': []})
+                row['texts'].append(f'{name}: {_flat(text)}')
+                row['sides'].append(name)
+        listed.update(merged)
+        lines += ['', f'### {label}']
+        lines += table(merged) if merged else ['- (없음)']
+    extra = {}
+    for name, items in evidence.items():
+        for item in items:
+            url = item['ref'].strip()
+            if url not in listed:
+                row = extra.setdefault(url, {'texts': [], 'sides': []})
+                row['texts'].append(f'{name} {item.get("id", "")}: {_flat(item["observation"])}')
+                row['sides'].append(name)
+    if extra:
+        lines += ['', '### 근거로만 인용된 웹 페이지'] + table(extra)
+    lines.append('')
+    lines.append('- 링크 확인은 메인이 공개 뒤 실제로 열어 제목·내용 일치를 본 결과다. 내용의 기술적 정확성 검증은 아니다.'
+                 if status else '- 링크 확인 기록 없음(`research check` 미실행). 위 링크는 존재 여부를 확인하지 않았다.')
+    return lines
 
 
 USAGE_KEYS = ('input_tokens', 'cached_input_tokens', 'output_tokens')
@@ -4410,7 +4611,7 @@ def cmd_status(args):
 
 def neutral_architect_prompt(output):
     """検証済み中立パスだけを固定文へ渡す。自由文・提案・実装例は受け取らない。"""
-    metadata = {'inputs': output['inputs'], 'data': output['data'],
+    metadata = {'inputs': output['inputs'], 'data': output['data'], 'question_date': output['question_date'],
                 'output_contract': str(HERE.parent / 'references/architect-handoff.md'),
                 'output_example': str(HERE.parent / 'references/architect-handoff.example.json'),
                 'proposal_schema': str(SCHEMAS / 'proposal.schema.json'),
@@ -4427,6 +4628,12 @@ def neutral_architect_prompt(output):
         '입력 3종과 선택 data를 직접 읽고 scope 허용 범위에서 현행 코드·호출부·계약 양쪽·근거 원문을 충실히 조사하세요. '
         '요구사항 매핑·설계 전문·대안과 조건·위험·필수 검증·미확인을 빠뜨리지 않고 독립적으로 판단하세요. '
         '파일별 관찰 범위·현재 전체 파일 SHA256·작업트리/확인 날짜/Git 상태를 기록하세요.\n'
+        # 外部調査は scope が web を許すときだけ。検索語に社内情報を入れない規則は prompt_common と同じ。
+        'scope의 allowed_tools에 web이 있으면 question_date 기준으로 이 주제의 최신 동향, 일반적인 구현 방식·기술, '
+        '관련 논문을 WebSearch/WebFetch로 조사해 설계 판단에 반영하고, 실제로 연 페이지의 URL만 proposal.research와 '
+        'kind web 근거(ref는 URL 하나)에 기록하세요. 검색어에는 일반 기술 용어만 쓰고 로컬 코드·경로·사내 식별자·비밀을 넣지 마세요. '
+        'web이 없거나 조사할 의미가 없으면 web_used false와 빈 목록, not_applicable_reason을 쓰세요. '
+        'research.question_date에는 위 question_date를 그대로 쓰세요.\n'
         'file 근거의 줄 수·lines·ref·file_sha256은 evidence_inspect 명령에 --file <절대경로>와 '
         '--lines <a-b> 또는 --whole-file을 주어 얻은 값을 그대로 쓰세요. 이 검사는 읽기 전용이며 등록하지 않습니다. '
         '범위를 추측·자동 보정하지 말고, 빈 파일의 null 범위를 file 근거로 제출하지 마세요.\n'
@@ -4517,7 +4724,7 @@ def investigation_session(sid):
         output = {'status': 'ok', 'ready': True, 'session': sid,
                   'proposal_call': {'index': call['index'], 'ended_at': call['ended_at'],
                                     'model_status': call['model_status']},
-                  'inputs': inputs, 'data': data}
+                  'inputs': inputs, 'data': data, 'question_date': question_date(session)}
         if call['model_status'] == 'INCOMPLETE':
             output['caveat'] = 'Codex model reported INCOMPLETE; investigation may proceed conditionally, not as verified completion.'
         yield session, output
@@ -4552,7 +4759,8 @@ def cmd_architect_prompt(args):
     with locked_session(sid) as session:
         require_state(session, 'INPUTS_FROZEN')
         inputs, data = _neutral_inputs(sid, session)
-        output = {'status': 'ok', 'session': sid, 'inputs': inputs, 'data': data}
+        output = {'status': 'ok', 'session': sid, 'inputs': inputs, 'data': data,
+                  'question_date': question_date(session)}
         prompt = neutral_architect_prompt(output)
         return dict(output, architect_prompt=prompt, architect_prompt_sha256=sha256(prompt.encode('utf-8'))), 0
 
@@ -4619,6 +4827,11 @@ def parser():
     prepare.add_argument('--out', required=True, help='new separate proposal draft inside the current project')
     p = sub.add_parser('reveal')
     p.add_argument('--session', required=True)
+    p = sub.add_parser('research')
+    actions = p.add_subparsers(dest='action', required=True)
+    rc = actions.add_parser('check', help='after reveal: save main-verified link results for the research URLs of both proposals')
+    rc.add_argument('--session', required=True)
+    rc.add_argument('--file', required=True, help='absolute JSON draft inside the current project: {"checks": [{url, status, observed_title, note}]}')
     p = sub.add_parser('ledger')
     actions = p.add_subparsers(dest='action', required=True)
     lv = actions.add_parser('validate')
@@ -4673,7 +4886,7 @@ COMMANDS = {'init': cmd_init, 'freeze-inputs': cmd_freeze_inputs, 'call': cmd_ca
             'freeze': cmd_freeze, 'proposal': cmd_proposal, 'reveal': cmd_reveal, 'ledger': cmd_ledger, 'synthesis': cmd_synthesis,
             'finalize': cmd_finalize, 'status': cmd_status, 'prune': cmd_prune, 'measure-request': cmd_measure_request,
             'verify-codex': cmd_verify_codex, 'investigation-ready': cmd_investigation_ready,
-            'architect-prompt': cmd_architect_prompt}
+            'architect-prompt': cmd_architect_prompt, 'research': cmd_research_check}
 
 
 def run(argv=None):

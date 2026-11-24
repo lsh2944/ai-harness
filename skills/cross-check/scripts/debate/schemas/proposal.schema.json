@@ -15,6 +15,7 @@
   "risks",
   "assumptions",
   "evidence",
+  "research",
   "open_questions",
   "unverified"
  ],
@@ -213,6 +214,94 @@
      "observation": {
       "type": "string"
      }
+    }
+   }
+  },
+  "research": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "question_date",
+    "web_used",
+    "trends",
+    "common_practices",
+    "papers",
+    "not_applicable_reason"
+   ],
+   "properties": {
+    "question_date": {
+     "type": "string"
+    },
+    "web_used": {
+     "type": "boolean"
+    },
+    "trends": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "summary",
+       "url"
+      ],
+      "properties": {
+       "summary": {
+        "type": "string"
+       },
+       "url": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "common_practices": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "summary",
+       "url"
+      ],
+      "properties": {
+       "summary": {
+        "type": "string"
+       },
+       "url": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "papers": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "title",
+       "url",
+       "year",
+       "relevance"
+      ],
+      "properties": {
+       "title": {
+        "type": "string"
+       },
+       "url": {
+        "type": "string"
+       },
+       "year": {
+        "type": "string"
+       },
+       "relevance": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "not_applicable_reason": {
+     "type": "string"
     }
    }
   },

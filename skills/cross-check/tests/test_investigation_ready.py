@@ -165,7 +165,7 @@ class InvestigationReadyTests(unittest.TestCase):
             with self.subTest(plan_b=plan_b):
                 sid = self.proposed(plan_b, "result['summary'] = 'PRIVATE-PROPOSAL-SENTINEL'", data=True)
                 output = self.ready(sid)
-                self.assertEqual(set(output), {'status', 'ready', 'session', 'proposal_call', 'inputs', 'data'})
+                self.assertEqual(set(output), {'status', 'ready', 'session', 'proposal_call', 'inputs', 'data', 'question_date'})
                 self.assertEqual(set(output['proposal_call']), {'index', 'ended_at', 'model_status'})
                 self.assertEqual(set(output['inputs']), set(co.INPUT_FILES))
                 self.assertEqual(len(output['data']), 1)

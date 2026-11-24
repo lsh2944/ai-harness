@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import co_design_fixture as fx
 from test_partial_submission import SubmissionBase, co
 
 
@@ -26,6 +27,7 @@ class ProposalHandoffTests(SubmissionBase):
             'implementation_order': ['確認してから実装'], 'validation': [{'check': '境界ケース', 'layer': 'mock'}],
             'risks': [{'severity': 'high', 'risk': '契約の差', 'mitigation': '原文を照合'}],
             'assumptions': ['条件 A'], 'open_questions': ['C を誰が確認するか'], 'unverified': ['実環境'],
+            'research': fx.no_research(),
             'evidence': [{'id': 'local:source_a', 'kind': 'file', 'ref': 'src/app.py:L1-L2', 'observation': observation},
                          {'id': 'E1', 'kind': 'brief', 'ref': 'brief:L2', 'observation': 'requirement'},
                          {'id': 'E2', 'kind': 'inference', 'ref': 'inputs/data/raw.csv', 'observation': 'unverified inference'}]}

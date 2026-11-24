@@ -13,6 +13,12 @@ spec.loader.exec_module(co)
 
 VERSION = 'codex-cli 0.0.0-fake'
 
+
+def no_research():
+    """web を使わない提案の外部調査欄（基準日はセッション開始と同じ当日）。"""
+    return {'question_date': time.strftime('%Y-%m-%d'), 'web_used': False, 'trends': [], 'common_practices': [],
+            'papers': [], 'not_applicable_reason': 'scope has no web'}
+
 # 偽 codex。--version と exec だけを模倣し、argv・phase を記録する。
 FAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, signal, subprocess, sys, time
@@ -67,6 +73,8 @@ if phase == 'proposal':
               'evidence': [{'id': 'X1', 'kind': 'file', 'ref': 'src/app.py:L1-L3', 'observation': 'read'},
                            {'id': 'X2', 'kind': 'file', 'ref': 'src/other.py:L1-L1', 'observation': 'never read'},
                            {'id': 'X3', 'kind': 'brief', 'ref': 'brief:L1', 'observation': 'question'}],
+              'research': {'question_date': time.strftime('%Y-%m-%d'), 'web_used': False, 'trends': [],
+                           'common_practices': [], 'papers': [], 'not_applicable_reason': 'scope has no web'},
               'open_questions': [], 'unverified': []}
 elif phase == 'verify':
     # 版ゲートの自動点検: プローブ命令は実行し、秘密経路の命令は hook 拒否行だけを stderr に出す（実測形）。
@@ -242,6 +250,7 @@ class Env:
                 'design': {'components': ['c2'], 'flows': ['f2'], 'contracts': ['k2']},
                 'alternatives': [], 'implementation_order': ['s'], 'validation': [{'check': 'unit', 'layer': 'mock'}],
                 'risks': [], 'assumptions': [], 'open_questions': [], 'unverified': ['runtime'],
+                'research': no_research(),
                 'evidence': [{'id': evidence, 'kind': 'file', 'ref': 'src/app.py:L2-L3', 'observation': 'seen'},
                              {'id': 'E9', 'kind': 'inference', 'ref': 'reasoning', 'observation': 'inferred'}]}
 
