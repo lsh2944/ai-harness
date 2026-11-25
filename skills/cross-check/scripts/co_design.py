@@ -4679,7 +4679,9 @@ def neutral_architect_prompt(output):
         '--lines <a-b> 또는 --whole-file을 주어 얻은 값을 그대로 쓰세요. 이 검사는 읽기 전용이며 등록하지 않습니다. '
         '범위를 추측·자동 보정하지 말고, 빈 파일의 null 범위를 file 근거로 제출하지 마세요.\n'
         '읽기 전용입니다. 구현·테스트 실행·파일 작성·근거 등록·freeze·세션 변경·다른 자식 위임을 하지 마세요. '
-        '출력 계약·순수 JSON 예제·schema를 읽고 handoff_version:2의 JSON object 하나만 한국어 메시지로 반환하세요. '
+        # 出力トークン削減のため JSON 内の自由記述は英語に統一する（チャット最終報告は main が韓国語で書く）。
+        '출력 계약·순수 JSON 예제·schema를 읽고 handoff_version:2의 JSON object 하나만 반환하세요. '
+        'JSON 안의 자유 서술 문자열은 입력이 한국어여도 영어로 쓰고, 코드 식별자·경로·명령·인용 원문은 원형 그대로 두세요. '
         '최종 응답 전체가 JSON이어야 합니다. 앞뒤 설명·코드 펜스는 금지하며 필요한 설명은 JSON 내부의 기존 필드에 모두 보존하세요. '
         '관찰문은 proposal.evidence[].observation에 한 번만 작성하고 manifest에는 observation을 넣지 마세요. '
         '설명·조건·대안·위험을 축약하지 마세요. 새로운 사용자 판단이 필요하면 결과에 질문으로 남기세요.\n'

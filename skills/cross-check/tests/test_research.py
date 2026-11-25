@@ -121,6 +121,15 @@ class ProposalResearchTests(ResearchBase):
         self.assertIn(f'Question date (research baseline, set research.question_date to this): {today}', text)
         self.assertIn('External research:', text)
 
+    def test_prompts_request_english_free_text(self):
+        # 出力トークン削減のため、architect と Codex の自由記述は英語で求める。
+        sid = self.env.to_inputs_frozen()
+        prompt = self.env.ok('architect-prompt', '--session', sid)['architect_prompt']
+        self.assertIn('자유 서술 문자열은 입력이 한국어여도 영어로', prompt)
+        self.assertNotIn('한국어 메시지로 반환', prompt)
+        text = co.build_request(self.env.session(sid), 'proposal')
+        self.assertIn('Write every free-text value in the JSON in English', text)
+
 
 class ResearchCheckTests(ResearchBase):
     def revealed(self):
