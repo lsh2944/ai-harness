@@ -276,10 +276,16 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(i.render(text, {'PROJECT_ROOT': '/p'}, False, 't'), 'a /p\nz\n')
         with self.assertRaises(ValueError):
             i.render('x {{AWS_PROFILE}}', {}, False, 't')
+        # github_readme ブロックは GITHUB_OWNERS が空でないときだけ残す
+        block = 'a\n<!-- BEGIN github_readme -->\nowners {{GITHUB_OWNERS}}\n<!-- END github_readme -->\nz\n'
+        self.assertEqual(i.render(block, {'GITHUB_OWNERS': '`o1`'}, False, 't'), 'a\nowners `o1`\nz\n')
+        self.assertEqual(i.render(block, {'GITHUB_OWNERS': ''}, False, 't'), 'a\nz\n')
 
     def test_config_validation(self):
         bad = [{'project_root': 'relative'}, {'response_language': ''}, {'comment_language': 'a\nb'},
-               {'extra_protected_paths': 'x'}, {'python': 'python3'}]
+               {'extra_protected_paths': 'x'}, {'python': 'python3'},
+               {'github_owners': 'owner'}, {'github_owners': ['bad name']}, {'github_owners': [1]},
+               {'github_owners': ['-leading']}, {'github_owners': None}]
         for extra in bad:
             with self.subTest(extra=extra), patch.object(i, 'HOME', self.home), self.assertRaises(ValueError):
                 path = write_config(self.root)
@@ -293,6 +299,18 @@ class InstallTests(unittest.TestCase):
                 i.load_settings(path, True)  # --with-aws なのに aws 設定がない
             settings = i.load_settings(path, False)
         self.assertEqual(settings['runtime']['aws'], {'enabled': False})
+        # 見本の github_owners は空なので、README 英語化の規則は入らない
+        self.assertNotIn('root README', i.instructions_block(settings))
+        data = json.loads(path.read_text())
+        data['github_owners'] = ['example-owner', 'example-owner', 'Org2']
+        path.write_text(json.dumps(data))
+        with patch.object(i, 'HOME', self.home):
+            owned = i.load_settings(path, False)
+        block = i.instructions_block(owned)
+        self.assertIn('root README', block)
+        self.assertIn('`example-owner`, `Org2`', block)  # 重複は除き、順序は保つ
+        self.assertNotIn('github_readme', block)
+        self.assertNotIn('{{', block)
         self.assertEqual(settings['variables']['MEMORY_DIR'], i.template_path(
             str(self.home / '.claude/projects' / re.sub(r'[^A-Za-z0-9]', '-', str(self.root / 'project')) / 'memory')))
 

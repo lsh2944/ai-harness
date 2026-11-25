@@ -5,6 +5,7 @@
   "response_language": "Korean",
   "comment_language": "Japanese",
   "extra_protected_paths": [],
+  "github_owners": [],
   "aws": {
     "profile": "claude-assumed",
     "assume_role_cmd": "~/ai-harness/tools/aws/assume_role.sh",

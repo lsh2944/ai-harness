@@ -47,6 +47,9 @@ SKIP_NAMES = {'tests', '__pycache__', '.DS_Store'}
 RENDER_SUFFIXES = {'.md', '.yaml', '.yml'}
 VAR = re.compile(r'\{\{([A-Z_]+)\}\}')
 AWS_BLOCK = re.compile(r'<!-- BEGIN aws -->\n?(.*?)<!-- END aws -->\n?', re.S)
+# github_owners が設定されたときだけ残す指示ブロック（ルート README の英語化規則）
+GITHUB_BLOCK = re.compile(r'<!-- BEGIN github_readme -->\n?(.*?)<!-- END github_readme -->\n?', re.S)
+GITHUB_OWNER_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$')
 PROFILE_RE = re.compile(r'^[A-Za-z0-9_.+-]{1,128}$')
 ENV_NAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 AWS_MCP_TOOLS = ', mcp__aws-api__call_aws, mcp__aws-api__suggest_aws_commands'
@@ -125,6 +128,11 @@ def load_settings(path, with_aws):
         'COMMENT_LANGUAGE': _text(data.get('comment_language'), 'comment_language'),
         'AWS_MCP_TOOLS': '',
     }
+    # 任意。未設定・空ならルート README 英語化の規則ブロックを入れない（既存 PC の設定でも導入が失敗しない）。
+    owners = data.get('github_owners', [])
+    if not isinstance(owners, list) or not all(isinstance(o, str) and GITHUB_OWNER_RE.fullmatch(o) for o in owners):
+        raise ValueError('config: github_owners must be a list of GitHub account names')
+    variables['GITHUB_OWNERS'] = ', '.join(f'`{o}`' for o in dict.fromkeys(owners))
     extra = data.get('extra_protected_paths', [])
     if not isinstance(extra, list):
         raise ValueError('config: extra_protected_paths must be a list')
@@ -152,8 +160,10 @@ def load_settings(path, with_aws):
 
 # ---------------- テンプレート ----------------
 def render(text, variables, with_aws, label):
-    """{{VAR}} を置換し、<!-- BEGIN aws --> ブロックは --with-aws のときだけ残す。未解決の変数はエラー。"""
+    """{{VAR}} を置換し、<!-- BEGIN aws --> ブロックは --with-aws のときだけ、
+    <!-- BEGIN github_readme --> ブロックは GITHUB_OWNERS が空でないときだけ残す。未解決の変数はエラー。"""
     text = AWS_BLOCK.sub(lambda m: m.group(1) if with_aws else '', text)
+    text = GITHUB_BLOCK.sub(lambda m: m.group(1) if variables.get('GITHUB_OWNERS') else '', text)
     missing = set()
 
     def substitute(match):
