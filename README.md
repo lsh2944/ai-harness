@@ -1,92 +1,92 @@
 # ai-harness
 
-Claude Code와 Codex에 공통으로 쓰는 작업 지침·가드 hook·설정 조각·스킬·에이전트를 한 저장소에서 관리하고, `install/install.py`로 사용자 홈에 배치한다. 특정 프로젝트에 묶인 값은 `config.local.json`(Git 제외)에만 둔다.
+Shared working instructions, guard hooks, settings fragments, skills and agents for Claude Code and Codex, managed in one repository and deployed to the user's home directory by `install/install.py`. Values tied to a specific project live only in `config.local.json` (excluded from Git).
 
-## 구성
+## Layout
 
-| 경로 | 내용 |
+| Path | Contents |
 |---|---|
-| `instructions/` | `~/.claude/CLAUDE.md`·`~/.codex/AGENTS.md`에 마커 블록으로 넣는 지침. `language.md`(응답·주석 언어), `core.md`(판단 전 확인·토큰 효율·하네스 안전), `conduct.md`(정직성·기획 먼저·지식 3층·안정성 비교·광역 pkill 금지·cd 복합 명령 금지·MCP 우선), `aws-readonly.md`(선택 AWS 모듈) |
-| `instructions/project-template/CLAUDE.md` | 프로젝트 루트용 CLAUDE.md 견본(역할 흐름·위임·리뷰·문서 상태·실환경 경계). 설치 대상 아님, 복사해서 채운다 |
-| `hooks/` | `guard.py`(PreToolUse 가드), `usage_alert.py`(사용량 경고), `tests/` |
-| `install/install.py` | 배치 도구. 기본 dry-run |
-| `settings/` | 병합 조각. `claude.settings*.json`(권한·자동 모드 규칙·출력 상한 등), `codex.config*.toml`(Codex 기본값·덮어쓸 값·환경변수 제외 목록), `mcp*.json`(MCP 버전 고정·aws-api env) |
-| `agents/` | 공용 서브에이전트 `code-reviewer`·`architect`·`troubleshooter`·`script-feature`와 영역별 구현 에이전트 견본 `feature-template.md` |
-| `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev`(AWS 모듈) |
-| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/`(MFA 인증 갱신 스크립트, AWS 모듈), `privacy_check.py`(커밋 전 개인정보 검사), `harness_setup.py`(setup.sh 보조) |
-| `setup.sh` / `setup.cmd` | 새 컴퓨터 초기 설정(Mac/Linux / Windows). 아래 "새 컴퓨터 설정" 참고 |
-| `apply.sh` / `apply.cmd` | 설치본 반영(dry-run 요약 → `install.py --apply`의 `apply` 입력 확인). 아래 "설치본 반영(apply)" 참고 |
-| `.githooks/` | 저장소 git hook. `pre-commit`·`commit-msg`(개인정보 검사), `post-commit`(커밋 후 반영 알림), `post-merge`(pull 후 반영 알림) |
+| `instructions/` | Instructions inserted as marker blocks into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`: `language.md` (response/comment language, root README language), `core.md` (ask before judging, token efficiency, harness safety), `conduct.md` (honesty, plan first, three knowledge layers, stability comparison, no broad pkill, no `cd` compound commands, MCP first), `aws-readonly.md` (optional AWS module) |
+| `instructions/project-template/CLAUDE.md` | Template CLAUDE.md for a project root (role flow, delegation, review, document state, live-environment boundary). Not installed; copy and fill in |
+| `hooks/` | `guard.py` (PreToolUse guard), `usage_alert.py` (usage warning), `tests/` |
+| `install/install.py` | Deployment tool. Dry-run by default |
+| `settings/` | Merge fragments. `claude.settings*.json` (permissions, auto-mode rules, output limits, etc.), `codex.config*.toml` (Codex defaults, override values, environment-variable exclusion list), `mcp*.json` (MCP version pins, aws-api env) |
+| `agents/` | Shared subagents `code-reviewer`, `architect`, `troubleshooter`, `script-feature`, and the per-area implementation agent template `feature-template.md` |
+| `skills/` | `handoff`, `cross-check`, `efficient-investigation`, `task-metrics`, `prune-memory`, `assume-dev` (AWS module) |
+| `tools/` | `repo_context.py`, `investigation/`, `task_metrics/`, `aws/` (MFA credential refresh scripts, AWS module), `privacy_check.py` (pre-commit privacy check), `harness_setup.py` (helper for setup.sh) |
+| `setup.sh` / `setup.cmd` | Initial setup of a new computer (macOS/Linux / Windows). See "New computer setup" below |
+| `apply.sh` / `apply.cmd` | Apply to the installed copy (dry-run summary → `install.py --apply` confirmed by typing `apply`). See "Applying to the installed copy (apply)" below |
+| `.githooks/` | Repository git hooks. `pre-commit` and `commit-msg` (privacy check), `post-commit` (apply reminder after a commit), `post-merge` (apply reminder after a pull) |
 
-## 새 컴퓨터 설정(Mac/Linux)
+## New computer setup (macOS/Linux)
 
-Windows는 아래 "새 컴퓨터 설정(Windows)"을 따른다(`setup.sh`는 MINGW/MSYS/CYGWIN을 감지하면 `setup.cmd`를 안내하고 종료). git은 clone할 때 저장소의 스크립트를 실행하지 않으므로 clone만으로 자동 설치되지는 않는다. clone 후 `./setup.sh`를 한 번 실행한다.
+On Windows follow "New computer setup (Windows)" below (`setup.sh` detects MINGW/MSYS/CYGWIN, points to `setup.cmd` and exits). Git does not run repository scripts on clone, so cloning alone installs nothing. Run `./setup.sh` once after cloning.
 
-### ① Git·Python 준비
+### 1. Prepare Git and Python
 
-- macOS: `xcode-select --install`(Command Line Tools) 또는 Homebrew로 Git을 설치한다. Linux: 배포판 패키지 관리자로 설치한다.
-- `install.py`는 Python 3.11 이상(`tomllib`)이 필요하다. hook용 인터프리터는 venv가 아닌 시스템 Python이어야 한다(`setup.sh`가 PATH와 흔한 설치 위치에서 찾아 제안한다).
+- macOS: install Git with `xcode-select --install` (Command Line Tools) or Homebrew. Linux: use the distribution's package manager.
+- `install.py` needs Python 3.11 or later (`tomllib`). The hook interpreter must be a system Python, not a venv (`setup.sh` looks in PATH and common install locations and suggests one).
 
-### ② GitHub fine-grained token 만들기
+### 2. Create a GitHub fine-grained token
 
 1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → **Generate new token**.
-2. Token name을 정하고 **Expiration(만료일)** 을 설정한다. 만료되면 새 토큰을 만들어 아래 "토큰 교체"대로 바꾼다.
-3. **Resource owner**: 본인 계정. **Repository access**: "Only select repositories"에서 이 저장소(필요하면 다른 개인 저장소도)를 고른다.
-4. **Repository permissions**: **Contents → Read and write**. Metadata는 자동으로 Read-only가 붙는다.
-5. 생성 직후 한 번만 보이는 토큰 값을 복사한다. 토큰은 저장소 파일·`config.local.json`·git 설정에 넣지 않는다.
+2. Choose a token name and set an **Expiration**. When it expires, create a new token and replace it as described in "Rotating the token" below.
+3. **Resource owner**: your account. **Repository access**: under "Only select repositories", pick this repository (and other personal repositories if needed).
+4. **Repository permissions**: **Contents → Read and write**. Metadata is added automatically as Read-only.
+5. Copy the token value, which is shown only once right after creation. Never put the token in repository files, `config.local.json` or git config.
 
-### ③ clone과 인증 저장
+### 3. Clone and store credentials
 
 ```bash
-git clone https://github.com/<GitHub 사용자명>/ai-harness.git
+git clone https://github.com/<GitHub username>/ai-harness.git
 ```
 
-- 프롬프트의 `Username`에는 GitHub 사용자명, `Password`에는 ②의 토큰을 붙여 넣는다(입력해도 화면에 표시되지 않는다).
-- macOS: Command Line Tools·Homebrew의 Git은 보통 credential helper `osxkeychain`이 설정되어 있어 토큰이 키체인에 저장되고 다음부터 묻지 않는다. `git config --get credential.helper`로 확인한다.
-- Linux: credential helper가 설정되어 있지 않으면 fetch·push마다 다시 묻는다. 쓸 수 있는 helper(libsecret, Git Credential Manager, 메모리에만 잠시 두는 `cache` 등)는 배포판·데스크톱 환경에 따라 다르다. `store`는 토큰을 홈의 파일에 평문으로 저장하므로 권장하지 않는다.
+- At the prompt, enter your GitHub username for `Username` and paste the token from step 2 for `Password` (nothing is shown while typing).
+- macOS: Git from Command Line Tools or Homebrew usually has the `osxkeychain` credential helper configured, so the token is stored in the keychain and not asked again. Check with `git config --get credential.helper`.
+- Linux: without a credential helper, every fetch and push asks again. Available helpers (libsecret, Git Credential Manager, the in-memory `cache`, etc.) depend on the distribution and desktop environment. `store` keeps the token in plain text in a file in your home directory and is not recommended.
 
-### ④ `./setup.sh`
+### 4. `./setup.sh`
 
-clone한 폴더에서 터미널로 직접 실행한다(파이프·AI 도구 등 비대화 실행은 거부). 다시 실행해도 안전하며 끝난 단계는 건너뛴다.
+Run it yourself in a terminal from the cloned folder (non-interactive runs such as pipes or AI tools are refused). It is safe to re-run; completed steps are skipped.
 
 ```bash
 cd ai-harness
-./setup.sh            # 끝까지(적용 여부는 마지막에 묻는다)
-./setup.sh --no-apply # dry-run 요약까지만
+./setup.sh            # all steps (asks whether to apply at the end)
+./setup.sh --no-apply # stop after the dry-run summary
 ```
 
-1. 이 저장소에만 쓰는 커밋 작성자(`git config --local user.name`·`user.email`)가 없으면 입력받는다. 전역 git 설정은 바꾸지 않는다. 메일은 `<개인 메일>` 또는 GitHub noreply 메일(`<ID>+<GitHub 사용자명>@users.noreply.github.com`)을 쓴다.
-2. `git config --local core.hooksPath .githooks`를 설정한다(다른 값이 이미 있으면 바꿀지 묻는다).
-3. `config.local.json`이 없으면 대화형으로 만든다(권한 0600). project_root(기본 `$HOME/project`), hook용 python(venv 밖 Python 3.11+ 제안, `-`로 비우면 `null`), 응답·주석 언어(견본 기본값), AWS 모듈 사용 여부. `extra_protected_paths`에는 이 clone의 `.githooks`·`tools/privacy_check.py`·`tools/harness_setup.py`·`setup.sh`·`apply.sh` 절대 경로가 들어간다. AWS를 쓰면 견본의 `aws` 절을 복사하고(`assume_role_cmd`는 이 clone의 경로로 바꿈) 종료하므로, `aws.roles`·`aws.mfa_serial`(필요하면 `profile`·`assume_role_envs`)을 실제 값으로 편집한 뒤 다시 실행한다. 견본 값 그대로면 다음 단계로 가지 않는다.
-4. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한 뒤 `install.py` dry-run 요약(`SAME`은 생략)을 보여 준다. 변경이 없으면 여기서 끝난다. `--with-aws`는 `config.local.json`에 `aws` 절(object)이 있으면 붙인다. `aws`가 `null` 등 object가 아니거나 `AWS`처럼 대소문자만 다른 키가 있으면 오류로 멈춘다(AWS를 쓰지 않으려면 키를 지운다).
-5. 적용할지 묻고, `y`면 `install.py --apply`를 실행한다. 이어서 install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다.
+1. If this repository has no commit author of its own (`git config --local user.name` / `user.email`), it asks for one. Global git settings are not changed. Use `<personal email>` or the GitHub noreply address (`<ID>+<GitHub username>@users.noreply.github.com`).
+2. Sets `git config --local core.hooksPath .githooks` (asks before changing an existing different value).
+3. If `config.local.json` does not exist, creates it interactively (mode 0600): project_root (default `$HOME/project`), hook python (suggests a Python 3.11+ outside any venv; `-` leaves it `null`), response and comment languages (template defaults), and whether to use the AWS module. `extra_protected_paths` receives the absolute paths of this clone's `.githooks`, `tools/privacy_check.py`, `tools/harness_setup.py`, `setup.sh` and `apply.sh`. With AWS enabled it copies the template's `aws` section (with `assume_role_cmd` rewritten to this clone's path) and exits, so edit `aws.roles` and `aws.mfa_serial` (and `profile` / `assume_role_envs` if needed) to real values and run it again. It does not proceed while template values remain.
+4. Shows `AWS module (--with-aws): on/off/placeholder`, then the `install.py` dry-run summary (`SAME` entries omitted). Stops here if nothing changes. `--with-aws` is added when `config.local.json` has an `aws` section (an object). It stops with an error when `aws` is not an object (e.g. `null`) or when a key differs only by case such as `AWS` (delete the key to go without AWS).
+5. Asks whether to apply; on `y` it runs `install.py --apply`. You must then type `apply` at install.py's own confirmation prompt for files to be written.
 
-### ⑤ 이후 커밋·push
+### 5. Committing and pushing afterwards
 
-- 커밋하면 pre-commit·commit-msg hook이 파일과 커밋 메시지의 개인정보 검사를 실행한다(아래 "git hook").
-- `git push origin main`은 저장된 토큰으로 인증된다.
+- On commit, the pre-commit and commit-msg hooks run the privacy check on files and the commit message (see "Git hooks" below).
+- `git push origin main` authenticates with the stored token.
 
-### 문제 해결(인증)
+### Troubleshooting (authentication)
 
-| 증상 | 원인 | 대처 |
+| Symptom | Cause | Fix |
 |---|---|---|
-| 403 `Write access to repository not granted` | 토큰에 이 저장소 또는 Contents 쓰기 권한이 없음, 또는 키체인에 다른 토큰이 저장되어 있음 | ②의 Repository access·Contents 권한을 확인하거나 새 토큰을 만들고 아래대로 교체 |
-| 401 / `Invalid username or token` | 토큰 만료·오입력 | 새 토큰을 만들어 교체 |
+| 403 `Write access to repository not granted` | The token lacks this repository or Contents write permission, or a different token is stored in the keychain | Check Repository access and Contents permission from step 2, or create a new token and replace it as below |
+| 401 / `Invalid username or token` | Token expired or mistyped | Create a new token and replace it |
 
-토큰 교체(macOS 키체인): 저장된 항목을 지운 뒤 다시 fetch·push하면 Username·Password(새 토큰)를 다시 묻는다.
+Rotating the token (macOS keychain): erase the stored entry; the next fetch or push asks for Username and Password (the new token) again.
 
 ```bash
 printf 'protocol=https\nhost=github.com\n\n' | git credential-osxkeychain erase
 git push origin main
 ```
 
-Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다름).
+On Linux, follow the method of the credential helper you configured (environment-dependent).
 
-## 새 컴퓨터 설정(Windows)
+## New computer setup (Windows)
 
-대상은 Claude Code(데스크톱 앱·CLI)다. Codex 연동·cross-check 스킬의 Windows 실행·AWS 모듈은 아직 지원하지 않는다(2단계). 명령은 PowerShell 또는 cmd 터미널에서 사용자가 직접 실행한다.
+The target is Claude Code (desktop app and CLI). Codex integration, running the cross-check skill on Windows and the AWS module are not supported yet (phase 2). Run the commands yourself in a PowerShell or cmd terminal.
 
-1. Git·Python·GitHub CLI 설치(Python은 3.11 이상, Microsoft Store 별칭이 아닌 실제 설치본):
+1. Install Git, Python and the GitHub CLI (Python 3.11 or later, a real installation rather than the Microsoft Store alias):
 
    ```powershell
    winget install --id Git.Git -e
@@ -94,117 +94,118 @@ Linux는 설정한 credential helper의 방법을 따른다(환경에 따라 다
    winget install --id GitHub.cli -e
    ```
 
-2. 인증과 clone: `gh auth login --web`으로 로그인한 뒤(자격 증명은 Windows 자격 증명 관리자에 저장된다) `gh repo clone <GitHub 사용자명>/ai-harness`.
-3. clone한 폴더에서 `.\setup.cmd`를 실행한다(`--no-apply`면 dry-run 요약까지만). 단계는 `setup.sh`와 같다: 이 저장소 전용 커밋 작성자 → `core.hooksPath=.githooks` → `config.local.json` 대화형 생성(`icacls`로 본인만 접근, AWS 모듈은 꺼진 상태) → dry-run 요약 → 확인 → `install.py --apply`(여기서 다시 `apply` 입력).
-   - `.ps1`이 아니라 `.cmd`인 이유: Windows PowerShell의 기본 실행 정책이 스크립트 실행을 막기 때문이다. 대화형 단계는 `tools/harness_setup.py`(`setup-windows`·`apply-windows`)가 처리한다.
-   - 파이프·리다이렉트·AI 도구처럼 콘솔이 아닌 stdin은 거부한다(Windows의 `isatty()`는 NUL도 참이므로 `GetConsoleMode`로 확인).
-4. Claude Code를 다시 시작하면 hook이 적용된다. 적용 후 확인할 것은 아래 "Windows 동작 메모".
+2. Authenticate and clone: log in with `gh auth login --web` (credentials are stored in Windows Credential Manager), then `gh repo clone <GitHub username>/ai-harness`.
+3. Run `.\setup.cmd` in the cloned folder (`--no-apply` stops after the dry-run summary). The steps match `setup.sh`: repository-local commit author → `core.hooksPath=.githooks` → interactive `config.local.json` creation (owner-only access via `icacls`, AWS module off) → dry-run summary → confirmation → `install.py --apply` (type `apply` again there).
+   - Why `.cmd` and not `.ps1`: the default Windows PowerShell execution policy blocks scripts. The interactive steps are handled by `tools/harness_setup.py` (`setup-windows` / `apply-windows`).
+   - Non-console stdin such as pipes, redirects and AI tools is refused (`isatty()` is also true for NUL on Windows, so `GetConsoleMode` is checked).
+4. Restart Claude Code to activate the hooks. See "Windows notes" below for what to check afterwards.
 
-### Windows 동작 메모
+### Windows notes
 
-- 줄바꿈: `.gitattributes`가 텍스트를 LF로 고정한다(`core.autocrlf=true`여도 셸 스크립트·git hook이 CRLF로 바뀌지 않게). `*.cmd`·`*.ps1`만 CRLF.
-- hook 등록: `/bin/sh` 래퍼(`guard_hook.sh`) 대신 `"C:/.../python.exe" "C:/Users/<이름>/.claude/hooks/guard.py"`처럼 python을 직접 실행한다(`/` 구분자는 Git Bash·cmd 어디서 해석돼도 같은 경로). guard matcher에 `PowerShell`·`MultiEdit`이 추가된다.
-- 권한 규칙의 하네스 경로는 `Edit(//c/<경로>/hooks/**)`(드라이브 문자를 첫 요소로 한 `/` 구분자) 형식으로 렌더링된다. 스킬 문서의 실행 예시는 `& "C:/.../python.exe" "..."`(PowerShell 호출) 형식이다.
-- `settings.json`의 `env`에 `PYTHONUTF8=1`을 넣는다(시스템 코드페이지가 cp932 등이어도 한국어 출력이 깨지지 않게). hook 스크립트는 자체적으로도 stdin/stdout을 UTF-8로 고정한다.
-- git hook(`pre-commit`·`commit-msg`)은 Git Bash에서 `python3` → `python` → `py -3` 순으로 실제로 실행되는 Python을 찾는다.
+- Line endings: `.gitattributes` pins text files to LF (so shell scripts and git hooks are not converted to CRLF even with `core.autocrlf=true`). Only `*.cmd` and `*.ps1` use CRLF.
+- Hook registration: instead of the `/bin/sh` wrapper (`guard_hook.sh`), python is run directly as `"C:/.../python.exe" "C:/Users/<name>/.claude/hooks/guard.py"` (with `/` separators the path resolves the same in Git Bash and cmd). `PowerShell` and `MultiEdit` are added to the guard matcher.
+- Harness paths in permission rules are rendered as `Edit(//c/<path>/hooks/**)` (drive letter as the first element, `/` separators). Command examples in skill documents use the `& "C:/.../python.exe" "..."` form (PowerShell call operator).
+- `PYTHONUTF8=1` is added to `env` in `settings.json` (so non-ASCII output is not garbled when the system code page is cp932 or similar). The hook scripts also pin stdin/stdout to UTF-8 themselves.
+- The git hooks (`pre-commit`, `commit-msg`) look for a working Python in Git Bash in the order `python3` → `python` → `py -3`.
 
-## git hook(`.githooks/`)
+## Git hooks (`.githooks/`)
 
-`setup.sh`가 `core.hooksPath`를 설정한 저장소에서만 동작한다. 수동 설정: `git config --local core.hooksPath .githooks`.
+They work only in repositories where `setup.sh` set `core.hooksPath`. Manual setup: `git config --local core.hooksPath .githooks`.
 
-- **pre-commit**: `python3 tools/privacy_check.py --staged`로 index의 삭제 외 모든 변경 파일(추가·수정·이름 변경·타입 변경, 심볼릭 링크는 대상 문자열)을 검사한다. 12자리 AWS 계정 ID·IAM ARN·이메일·AWS 액세스 키·GitHub 토큰·`sk-` 키·PRIVATE KEY 헤더·`/Users/<이름>`·`/home/<이름>` 경로·현재 사용자의 HOME 경로와 `privacy_words`를 찾으면 `파일:행: 종류(값 일부 마스킹)`를 출력하고 커밋을 막는다.
-  - 크기 상한은 없다(1MiB 단위로 읽어 줄 단위로 검사). BOM 있는 UTF-8/16/32는 디코드해 검사하고, BOM만 붙인 위장에 대비해 원본 바이트에서 NUL을 뺀 UTF-8·latin-1로도 한 번 더 검사한다(검출은 합집합). 앞부분에 NUL이 있는 바이너리(BOM 없는 UTF-16 포함)는 검사할 수 없으므로 `SKIP`으로 표시하고 **커밋을 막는다**. 내용을 확인한 뒤 `--no-verify` 사용 여부는 사용자가 결정한다.
-  - `privacy_words`가 없으면 "고유명사 검사는 privacy_words 설정 시에만"이라는 알림이 한 줄 나온다(차단하지 않음).
-  - 오탐이면 **사용자 확인을 받은 뒤** `tools/privacy_check.py`의 패턴·허용 목록을 고친다(허용 목록은 최소한으로 두고 근거를 주석으로 남긴다). 테스트용 값은 소스에 그대로 쓰지 말고 실행 시 문자열을 이어 붙여 만든다.
-  - `git commit --no-verify`로 건너뛸 수 있지만 우회 여부는 사용자가 판단한다.
-  - 전체 점검: `python3 tools/privacy_check.py --all`(추적 파일 전체, index 내용. 바이너리가 있으면 종료 코드 1).
-- **commit-msg**: `python3 tools/privacy_check.py --message <파일>`로 커밋 메시지 전체(`#` 주석 줄·`commit -v`의 scissors 아래 포함. `-m`·`-F` 커밋은 cleanup=whitespace라 주석 줄도 본문에 남기 때문)를 같은 패턴으로 검사해 검출 시 막는다. 편집기 템플릿의 주석(예: `commit -v`의 diff)에 검출 값이 있어 막히면 메시지 수정이나 `--no-verify`는 사용자가 판단한다. `Co-Authored-By`의 `noreply@anthropic.com`은 허용. 커밋 작성자(user.email) 정보는 검사하지 않는다.
-- **post-commit**: 방금 만든 커밋(최초 커밋은 빈 트리 대비, 병합 커밋은 첫 번째 부모 대비)에서 `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`가 바뀌었으면 `[ai-harness] 설치본 반영 필요: ./apply.sh` 한 줄을 **출력만** 한다. Python·install.py·apply.sh를 실행하지 않고 항상 종료 코드 0이다(커밋에 영향 없음).
-- **post-merge**: `git pull`(merge·fast-forward) 후 같은 경로가 바뀌었으면 목록과 `./apply.sh` 실행 안내(저장소 밖에서 쓸 절대 경로 포함)를 **출력만** 한다. Python·install.py를 실행하지 않는다. `config.local.json`이 없으면 `./setup.sh`, aws 절이 견본 값이면 편집을 안내한다. `git pull --rebase`·`checkout`에서는 실행되지 않는다.
-- 이 hook들과 검사기·`setup.sh`·`apply.sh`·`tools/harness_setup.py`를 바꾸거나 `core.hooksPath`를 바꾸는 것은 커밋 전에 사용자 확인을 받는다(CLAUDE.md). `setup.sh`가 새로 만드는 `config.local.json`은 이 경로들을 `extra_protected_paths`에 넣어 가드가 수정 시 승인을 요구하게 한다. **이미 `config.local.json`이 있는 컴퓨터**는 clone 절대 경로 기준 `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh`, `<clone>/apply.sh` 중 빠진 것을 `extra_protected_paths`에 직접 추가한 뒤 터미널에서 `./apply.sh`를 실행해야 반영된다(2026-11-19 `apply.sh` 추가 전에 만든 `config.local.json`에는 `apply.sh`가 없다).
+- **pre-commit**: `python3 tools/privacy_check.py --staged` checks every staged non-deletion change (added, modified, renamed, type-changed; for symlinks the target string). When it finds a 12-digit AWS account ID, IAM ARN, email address, AWS access key, GitHub token, `sk-` key, PRIVATE KEY header, `/Users/<name>` or `/home/<name>` path, the current user's HOME path, or a `privacy_words` entry, it prints `file:line: kind (value partially masked)` and blocks the commit.
+  - There is no size limit (files are read in 1 MiB chunks and checked line by line). UTF-8/16/32 with a BOM is decoded before checking; to catch a BOM-only disguise, the raw bytes with NULs removed are also checked once more as UTF-8 and latin-1 (findings are unioned). Binaries with an early NUL (including BOM-less UTF-16) cannot be checked, so they are shown as `SKIP` and **the commit is blocked**. After checking the content, the user decides whether to use `--no-verify`.
+  - Without `privacy_words`, a one-line notice says proper-noun checks only run when privacy_words is set (not blocking).
+  - For a false positive, fix the patterns or allowlist in `tools/privacy_check.py` **only after the user confirms** (keep the allowlist minimal and leave the reason in a comment). Do not write test values literally in source; build them by concatenating strings at runtime.
+  - `git commit --no-verify` skips it, but the user decides whether to bypass.
+  - Full scan: `python3 tools/privacy_check.py --all` (all tracked files, index content; exit code 1 if any binary is present).
+- **commit-msg**: `python3 tools/privacy_check.py --message <file>` checks the whole commit message with the same patterns and blocks on findings (including `#` comment lines and text below the `commit -v` scissors line, because `-m` / `-F` commits use cleanup=whitespace and keep comment lines in the body). If a comment in the editor template (e.g. the diff of `commit -v`) contains a detected value and blocks the commit, the user decides whether to edit the message or use `--no-verify`. `noreply@anthropic.com` in `Co-Authored-By` is allowed. Commit author (user.email) information is not checked.
+- **post-commit**: if the new commit (compared against the empty tree for the first commit, or the first parent for a merge commit) changed `hooks/ install/ settings/ instructions/ skills/ agents/ tools/aws/`, it **only prints** one line: `[ai-harness] 설치본 반영 필요: ./apply.sh` ("apply needed"). It never runs Python, install.py or apply.sh and always exits 0 (no effect on the commit).
+- **post-merge**: after `git pull` (merge or fast-forward), if the same paths changed, it **only prints** the list and how to run `./apply.sh` (including an absolute path for use outside the repository). It never runs Python or install.py. Without `config.local.json` it points to `./setup.sh`; if the aws section still holds template values it asks you to edit it. It does not run for `git pull --rebase` or `checkout`.
+- Changing these hooks, the checker, `setup.sh`, `apply.sh` or `tools/harness_setup.py`, or changing `core.hooksPath`, requires user confirmation before committing (CLAUDE.md). A `config.local.json` newly created by `setup.sh` lists these paths in `extra_protected_paths` so the guard asks for approval before they are modified. **On a computer that already has `config.local.json`**, add any missing entries among `<clone>/.githooks`, `<clone>/tools/privacy_check.py`, `<clone>/tools/harness_setup.py`, `<clone>/setup.sh` and `<clone>/apply.sh` (absolute clone paths) to `extra_protected_paths` yourself and run `./apply.sh` in a terminal (a `config.local.json` created before `apply.sh` was added on 2026-11-19 lacks `apply.sh`).
 
-## 설정 작성
+## Configuration
 
-`setup.sh`가 만들지 않은 경우 견본을 복사해 편집한다.
+If `setup.sh` did not create it, copy the template and edit it.
 
 ```bash
 cp config.example.json config.local.json
 ```
 
-| 키 | 템플릿 변수 | 설명 |
+| Key | Template variable | Description |
 |---|---|---|
-| `project_root` | `{{PROJECT_ROOT}}` | 주 작업 프로젝트 절대 경로(`~` 허용). 가드의 보호 경로(`<project>/.claude/settings*`)와, cwd를 확정할 수 없을 때의 cross-check 작업 루트 대체값 |
-| (자동) | `{{HARNESS_HOME}}` | 이 저장소 위치 |
-| `memory_dir` | `{{MEMORY_DIR}}` | prune-memory 기본 대상. `null`이면 `~/.claude/projects/<project_root의 영숫자 외 문자를 -로>/memory` |
-| `python` | `{{PYTHON}}` | hook을 실행할 인터프리터. `null`이면 install.py를 실행한 인터프리터. venv·이 저장소 안의 인터프리터는 거부한다 |
-| `response_language` | `{{RESPONSE_LANGUAGE}}` | 응답 언어(예: Korean) |
-| `comment_language` | `{{COMMENT_LANGUAGE}}` | 코드 주석 언어(예: Japanese) |
-| `extra_protected_paths` | — | 가드가 수정 시 승인을 요구할 추가 절대 경로 |
-| `aws.profile` | `{{AWS_PROFILE}}` | AI가 쓰는 읽기 전용 프로필(`--with-aws`일 때만 사용) |
-| `aws.assume_role_cmd` | `{{ASSUME_ROLE_CMD}}` | 인증 갱신 스크립트 절대 경로. 예: `tools/aws/assume_role.sh` |
-| `aws.assume_role_envs` | `{{AWS_ENVS}}`(쉼표 목록) | 가드가 `--awsEnv <이름>` 실행을 허용할 환경 이름 |
-| `aws.roles`, `aws.mfa_serial` | — | `tools/aws/assume_role.py`가 쓰는 환경별 역할 ARN과 MFA 장치 ARN |
-| `privacy_words` | — | 선택. pre-commit·commit-msg 개인정보 검사에 더할 사용자별 단어 목록(실명·회사 도메인 등, 대소문자 무시). install.py는 이 키를 쓰지 않는다 |
+| `project_root` | `{{PROJECT_ROOT}}` | Absolute path of the main working project (`~` allowed). Used for the guard's protected paths (`<project>/.claude/settings*`) and as the cross-check working-root fallback when the cwd cannot be determined |
+| (automatic) | `{{HARNESS_HOME}}` | Location of this repository |
+| `memory_dir` | `{{MEMORY_DIR}}` | Default target of prune-memory. `null` means `~/.claude/projects/<project_root with non-alphanumerics replaced by ->/memory` |
+| `python` | `{{PYTHON}}` | Interpreter that runs the hooks. `null` means the interpreter that ran install.py. Interpreters in a venv or inside this repository are refused |
+| `response_language` | `{{RESPONSE_LANGUAGE}}` | Response language (e.g. Korean) |
+| `comment_language` | `{{COMMENT_LANGUAGE}}` | Code comment language (e.g. Japanese) |
+| `extra_protected_paths` | — | Additional absolute paths for which the guard asks for approval before modification |
+| `github_owners` | `{{GITHUB_OWNERS}}` | Optional list of GitHub account names. The instruction to write the root README in English is installed only when it is non-empty, and applies only to repositories owned by these accounts. Not written by `setup.sh`; add it to `config.local.json` yourself |
+| `aws.profile` | `{{AWS_PROFILE}}` | Read-only profile used by the AI (only with `--with-aws`) |
+| `aws.assume_role_cmd` | `{{ASSUME_ROLE_CMD}}` | Absolute path of the credential refresh script, e.g. `tools/aws/assume_role.sh` |
+| `aws.assume_role_envs` | `{{AWS_ENVS}}` (comma list) | Environment names for which the guard allows `--awsEnv <name>` |
+| `aws.roles`, `aws.mfa_serial` | — | Per-environment role ARNs and the MFA device ARN used by `tools/aws/assume_role.py` |
+| `privacy_words` | — | Optional. Per-user words added to the pre-commit and commit-msg privacy check (real names, company domains, etc., case-insensitive). install.py does not use this key |
 
-install.py가 내부에서 계산하는 변수: `{{SKILL_DIR}}`(설치된 각 스킬 폴더), `{{AWS_MCP_TOOLS}}`(`--with-aws`면 에이전트 tools에 aws-api MCP 도구를 붙이고 아니면 빈 문자열). 마크다운의 `<!-- BEGIN aws -->`~`<!-- END aws -->` 블록은 `--with-aws`일 때만 남는다. 치환되지 않은 `{{...}}`가 남으면 설치를 중단한다.
+Variables computed inside install.py: `{{SKILL_DIR}}` (each installed skill folder) and `{{AWS_MCP_TOOLS}}` (adds the aws-api MCP tools to agent tools with `--with-aws`, otherwise an empty string). Markdown blocks between `<!-- BEGIN aws -->` and `<!-- END aws -->` remain only with `--with-aws`. Installation stops if any unreplaced `{{...}}` remains.
 
-## 설치
+## Installation
 
 ```bash
-# 설정 파일은 이 저장소 안의 일반 파일만 허용한다(바깥 경로·바깥을 가리키는 링크는 거부). 옵션 생략형(--ap 등)은 받지 않는다.
-# 1) dry-run: 쓰지 않고 변경 예정 경로와 줄 수 요약만 출력한다(파일 내용·비밀값은 출력하지 않음)
+# Only regular files inside this repository are accepted as the config file (outside paths and links pointing outside are refused). Abbreviated options (--ap etc.) are not accepted.
+# 1) dry-run: writes nothing and prints only the paths to change and line-count summaries (no file contents or secrets)
 python3 install/install.py --config config.local.json [--target claude|codex|both] [--with-aws]
-# 2) 확인 후 적용: 사용자가 직접 터미널에서 실행하고, 확인 문구에 apply를 입력해야 쓴다.
-#    stdin이 터미널이 아니면(AI 도구·파이프·CI 실행) 항상 거부하며, 이를 건너뛰는 옵션·환경변수는 없다.
+# 2) apply after review: the user runs it directly in a terminal and must type apply at the confirmation prompt.
+#    It is always refused when stdin is not a terminal (AI tools, pipes, CI), and there is no option or environment variable to skip this.
 python3 install/install.py --config config.local.json [--target ...] [--with-aws] --apply
 ```
 
-배치 대상:
+Deployment targets:
 
-- Claude: `~/.claude/hooks/{guard.py,usage_alert.py,guard_hook.sh,harness_config.json}`, `~/.claude/settings.json`(조각 병합 + 소유 hook 교체), `~/.claude.json`(있을 때만: 등록된 MCP의 버전 고정, `--with-aws`면 aws-api env), `~/.claude/CLAUDE.md`(마커 블록), `~/.claude/skills/<이름>/`, `~/.claude/agents/<이름>.md`
-- Codex: `~/.codex/hooks/…`, `~/.codex/config.toml`(조각 적용 + `# BEGIN/END shared harness hooks` 블록), `~/.codex/AGENTS.md`(마커 블록, 언어 지침 포함), `~/.agents/skills/<이름>/`
-- `cross-check`·`prune-memory` 스킬 폴더에는 실행 설정 `harness_config.json`도 둔다. 스킬의 `tests/`는 배치하지 않는다.
+- Claude: `~/.claude/hooks/{guard.py,usage_alert.py,guard_hook.sh,harness_config.json}`, `~/.claude/settings.json` (fragment merge + owned hook replacement), `~/.claude.json` (only if present: version pins for registered MCP servers, aws-api env with `--with-aws`), `~/.claude/CLAUDE.md` (marker block), `~/.claude/skills/<name>/`, `~/.claude/agents/<name>.md`
+- Codex: `~/.codex/hooks/…`, `~/.codex/config.toml` (fragments + a `# BEGIN/END shared harness hooks` block), `~/.codex/AGENTS.md` (marker block including the language instructions), `~/.agents/skills/<name>/`
+- The `cross-check` and `prune-memory` skill folders also get a runtime config `harness_config.json`. Skill `tests/` folders are not deployed.
 
-안전장치: `settings.json`은 조각의 스칼라·키를 **값이 없을 때만** 넣고(`defaultMode` 등 사용자가 정한 값은 유지), 리스트(deny/ask/hard_deny)는 중복 없이 추가한다. 기존 값의 형식이 예상과 다르면 쓰지 않고 중단한다. aws-api MCP의 읽기 전용 env만은 강제값으로 덮어쓴다. 기존 설정의 다른 키·사용자 hook은 보존하고 소유 hook·마커 블록만 교체한다. 쓰기는 원자적(임시 파일→rename)이고 권한은 0600이다. hook과 설정 sidecar를 먼저 두고 등록 파일(settings.json·config.toml)은 마지막에 쓴다. 준비 중·적용 중 다른 프로그램이 파일을 바꾸면 중단하고, 실패하면 이번에 쓴 파일을 되돌린다. 변경 전 파일은 `~/.ai-harness/backups/<시각>/`(0700)에 보관한다. 심볼릭 링크 대상은 거부한다.
+Safeguards: in `settings.json`, scalars and keys from fragments are inserted **only when absent** (values the user chose, such as `defaultMode`, are kept), and lists (deny/ask/hard_deny) are extended without duplicates. If an existing value has an unexpected shape, nothing is written and the run stops. Only the read-only env of the aws-api MCP is force-overwritten. Other keys and user hooks are preserved; only owned hooks and marker blocks are replaced. Writes are atomic (temp file → rename) with mode 0600. Hooks and the config sidecar are written first, and the registration files (settings.json, config.toml) last. If another program changes a file during preparation or apply, the run stops, and on failure the files written in this run are rolled back. Pre-change files are kept in `~/.ai-harness/backups/<timestamp>/` (0700). Symlink targets are refused.
 
-설치 후:
+After installing:
 
-- Codex는 hook 정의가 바뀌면 `[hooks.state]`의 `trusted_hash`가 맞지 않아 **경고 없이 hook을 실행하지 않는다.** 대화형 `codex` 시작 화면의 "Trust all and continue" 또는 세션 내 hooks 브라우저에서 사용자가 다시 신뢰하고, 차단돼야 할 명령(예: 비밀 파일 읽기)이 실제로 거부되는지 확인한다. `trusted_hash`를 직접 계산·기입하지 않는다.
-- Claude는 새 세션에서 hook이 적용된다.
-- 기존 `CLAUDE.md`·`AGENTS.md`에 같은 내용을 손으로 넣어 두었다면 dry-run의 `WARN … possible duplicate`를 보고 중복 부분을 직접 정리한다(자동으로 지우지 않는다).
+- When hook definitions change, Codex's `trusted_hash` in `[hooks.state]` no longer matches and Codex **silently skips the hooks.** The user must re-trust them via "Trust all and continue" on the interactive `codex` start screen or the in-session hooks browser, then confirm that commands that should be blocked (e.g. reading secret files) are actually refused. Never compute or write `trusted_hash` by hand.
+- Claude applies the hooks in new sessions.
+- If you had manually added the same content to an existing `CLAUDE.md` or `AGENTS.md`, check the dry-run's `WARN … possible duplicate` and clean up the duplicates yourself (they are not removed automatically).
 
-## 설치본 반영(apply)
+## Applying to the installed copy (apply)
 
-Claude·Codex는 이 저장소가 아니라 `~/.claude`·`~/.codex`·`~/.agents`에 설치된 사본을 읽는다. 설치기(`install.py`)가 템플릿 값(`{{PYTHON}}` 등)을 치환하고 `settings.json`·`config.toml`을 병합하므로 단순 복사·링크로는 대신할 수 없다. 또 가드·설정 변경이 사용자 확인 없이 적용되지 않도록 저장소 갱신(commit·pull)과 설치본 반영을 의도적으로 분리해 두었다.
+Claude and Codex read the installed copies in `~/.claude`, `~/.codex` and `~/.agents`, not this repository. The installer (`install.py`) substitutes template values (`{{PYTHON}}` etc.) and merges `settings.json` and `config.toml`, so a plain copy or link cannot replace it. Repository updates (commit, pull) and applying to the installed copy are also deliberately separated so that guard and settings changes never take effect without user confirmation.
 
-언제 필요한가:
+When it is needed:
 
-- 필요: `hooks/`·`install/`·`settings/`·`instructions/`·`skills/`·`agents/`·`tools/aws/`가 바뀌었을 때(커밋 후 post-commit, pull 후 post-merge가 알려 준다), `config.local.json`을 바꿨을 때.
-- 불필요: `README.md`·`CLAUDE.md`·`tools/privacy_check.py`·`.githooks/`·`setup.sh`·`apply.sh`·그 밖의 `tools/`(저장소에서 직접 실행하거나 설치 대상이 아님).
+- Needed: when `hooks/`, `install/`, `settings/`, `instructions/`, `skills/`, `agents/` or `tools/aws/` changed (post-commit after a commit and post-merge after a pull will tell you), or when you changed `config.local.json`.
+- Not needed: `README.md`, `CLAUDE.md`, `tools/privacy_check.py`, `.githooks/`, `setup.sh`, `apply.sh` and other `tools/` (run directly from the repository or not installed).
 
-사용법(저장소 폴더에서 터미널로 직접 실행. 다른 위치에서는 절대 경로로 실행해도 된다. Windows는 `.\apply.cmd`로 같은 단계를 실행한다):
+Usage (run it yourself in a terminal from the repository folder; from elsewhere, an absolute path works too. On Windows, `.\apply.cmd` runs the same steps):
 
 ```bash
 ./apply.sh
 ```
 
-1. `config.local.json`이 없으면 `./setup.sh` 안내 후 종료한다. 터미널이 아닌 실행(파이프·AI 도구)은 거부하고, Windows는 `apply.cmd` 안내 후 종료한다.
-2. `AWS 모듈(--with-aws): on/off/placeholder`를 표시한다. 견본 값(placeholder)이면 편집을 안내하고 종료한다. `on`이면 `--with-aws`를 붙인다.
-3. `install.py` dry-run 요약(`SAME` 생략)을 보여 준다. 변경이 없으면 "이미 최신"으로 종료한다.
-4. `install.py --config <절대 경로> [--with-aws] --apply`를 실행한다. install.py 자신의 확인 문구에 `apply`를 입력해야 실제로 쓴다(그 밖의 입력은 취소). 인터프리터는 `config.local.json`의 `python`, 없으면 venv가 아닌 Python 3.11 이상이다.
+1. Without `config.local.json` it points to `./setup.sh` and exits. Non-terminal runs (pipes, AI tools) are refused, and on Windows it points to `apply.cmd` and exits.
+2. Shows `AWS module (--with-aws): on/off/placeholder`. With template (placeholder) values it asks you to edit them and exits. With `on` it adds `--with-aws`.
+3. Shows the `install.py` dry-run summary (`SAME` omitted). If nothing changes it exits with "already up to date".
+4. Runs `install.py --config <absolute path> [--with-aws] --apply`. You must type `apply` at install.py's own confirmation prompt for anything to be written (any other input cancels). The interpreter is `python` from `config.local.json`, otherwise a non-venv Python 3.11 or later.
 
-동시 사용 주의:
+Concurrent use:
 
-- 설치는 컴퓨터마다 독립이다. 한 컴퓨터에서 push해도 다른 컴퓨터는 `git pull` 후 `./apply.sh`를 실행할 때까지 이전 버전으로 동작한다.
-- 같은 컴퓨터에서는 Claude Code·Codex를 종료한 뒤 적용한다(실행 중인 앱이 `~/.claude.json` 등을 동시에 쓰면 적용이 중단되거나 경합한다). `apply.sh`는 앱을 감지·종료하지 않고 안내만 한다. `apply.sh`(또는 `install.py --apply`)를 여러 터미널에서 동시에 실행하지 않는다.
+- Installations are independent per computer. A push from one computer does not change another until it runs `git pull` and then `./apply.sh`.
+- On the same computer, quit Claude Code and Codex before applying (if running apps write `~/.claude.json` and similar files at the same time, the apply stops or races). `apply.sh` does not detect or quit apps; it only reminds you. Do not run `apply.sh` (or `install.py --apply`) in several terminals at once.
 
-## 갱신
+## Updating
 
-저장소를 갱신(`git pull` 등)한 뒤 `./apply.sh`를 실행한다(hook을 설정했다면 post-merge가 반영 필요 여부를 알려 준다). 변경이 없으면 "이미 최신"으로 끝난다. 이전 버전에서 없어진 스킬 파일은 자동 삭제하지 않는다.
+After updating the repository (`git pull` etc.), run `./apply.sh` (if hooks are configured, post-merge tells you whether it is needed). If nothing changed it ends with "already up to date". Skill files removed since the previous version are not deleted automatically.
 
-## 테스트
+## Tests
 
-모든 테스트는 임시 디렉터리·임시 HOME에서 실행되며 실제 설정·AWS·Codex를 사용하지 않는다.
+All tests run in temporary directories with a temporary HOME and never use real settings, AWS or Codex.
 
 ```bash
 python3 -m unittest discover -s hooks/tests -t hooks/tests
@@ -216,11 +217,11 @@ python3 -m unittest discover -s tools/task_metrics -t tools/task_metrics
 python3 -m unittest discover -s tools/aws -t tools/aws
 ```
 
-`install/tests`는 venv가 아닌 기반 인터프리터로 install.py를 하위 프로세스 실행한다(Python 3.11 이상 필요, `tomllib`).
+`install/tests` runs install.py as a subprocess with the base interpreter rather than a venv (Python 3.11 or later required, `tomllib`).
 
-Windows에서는 `python3` 대신 `python`(또는 `py -3`)으로 실행한다. 심볼릭 링크를 만들 수 없는 환경(개발자 모드·관리자 권한 없음)·Windows에서 만들 수 없는 파일명(`*`·`:`·개행)·pty·FIFO·`/bin/zsh`가 필요한 검증은 사유를 남기고 skip한다. `setup.sh`·`apply.sh`(sh·pty) 테스트는 Mac/Linux 전용이고, Windows는 `setup-windows`·`apply-windows` 테스트가 대신한다. `skills/cross-check/tests`는 macOS 전용이다. GitHub Actions(`.github/workflows/test.yml`)가 ubuntu·macos·windows에서 이 스위트를 실행한다(Mac/Linux는 경로에 `work`가 없는 `/tmp` 복제에서 실행).
+On Windows, run with `python` (or `py -3`) instead of `python3`. Checks that need symlinks where they cannot be created (no developer mode or admin rights), file names Windows cannot create (`*`, `:`, newline), a pty, a FIFO or `/bin/zsh` are skipped with a reason. The `setup.sh` / `apply.sh` (sh, pty) tests are macOS/Linux only; on Windows the `setup-windows` / `apply-windows` tests cover them. `skills/cross-check/tests` is macOS only. GitHub Actions (`.github/workflows/test.yml`) runs this suite on ubuntu, macos and windows (macOS/Linux run from a `/tmp` copy whose path contains no `work`).
 
-`tools/tests`에는 `test_privacy_check.py`(개인정보 검사)와 `test_setup.py`(setup.sh·apply.sh·`.githooks`·`harness_setup.py`)도 들어 있다. `test_setup.py`는 작업 트리(Git 제외 파일 제외)를 임시 origin에 복제해 로컬 clone하고 임시 HOME·pty에서 실행하며, `install.py --apply`는 스텁으로만 확인한다. 개별 실행:
+`tools/tests` also contains `test_privacy_check.py` (privacy check) and `test_setup.py` (setup.sh, apply.sh, `.githooks`, `harness_setup.py`). `test_setup.py` copies the working tree (without Git-excluded files) to a temporary origin, clones it locally and runs with a temporary HOME and a pty; `install.py --apply` is checked only through a stub. To run them individually:
 
 ```bash
 python3 -m unittest discover -s tools/tests -t tools/tests -p 'test_privacy_check.py'
@@ -228,35 +229,35 @@ python3 -m unittest discover -s tools/tests -t tools/tests -p 'test_setup.py'
 python3 tools/privacy_check.py --all
 ```
 
-## 가드 동작 요약
+## Guard behavior summary
 
-- 설정 sidecar(`harness_config.json`)가 없거나 깨졌거나 값이 잘못되면(읽기 중 예기치 않은 예외 포함) **모든 도구 호출을 거부**한다(fail-closed). 이 경우 Claude도 hook을 고칠 수 없으므로 사용자가 `/hooks` 등으로 해제하거나 install.py를 다시 실행한다.
-- `install.py` 적용(`--apply`, 경로 변형·인터프리터·래퍼·인라인 실행 포함)은 가드 설정을 바꾸므로 승인 요청(Codex는 거부). 이 문자열 검출에 더해 install.py의 터미널 확인(비대화 실행 거부, `apply` 입력)을 추가 방어로 둔다. 둘 다 우회 가능성이 있는 보조 방어다(알려진 한계 참고).
-- `settings.json`의 보호용 강제 키(`--with-aws`의 `env.AWS_PROFILE`)는 기존 값과 달라도 덮어쓰며, dry-run에 `WARN … will be overwritten`으로 표시한다(값은 출력하지 않음).
-- 인증 갱신 스크립트는 `<aws.assume_role_cmd> --awsEnv <등록 환경>`의 단독 실행(또는 `echo <6자리> |` 입력)만 허용하고, 변수 대입·`env`/`export`·래퍼·인터프리터 경유·다른 명령과의 연결은 승인 요청. `tools/aws/assume_role.py`는 저장소의 `config.local.json`만 읽는다.
-- AWS는 조회 외 작업을 거부하지만 **Bedrock 모델 추론 4종**(`bedrock-runtime`의 `converse`·`converse-stream`·`invoke-model`·`invoke-model-with-response-stream`)만 예외다. 읽기 전용 프로필에는 추론 권한이 없으므로 `python3 <HARNESS_HOME>/tools/aws/bedrock_run.py <명령>` 경유로만 허용한다. 래퍼는 사용자가 만든 `~/.aws/bedrock_api_key`(전용 IAM 사용자의 Bedrock API 키, 권한 600)를 `AWS_BEARER_TOKEN_BEDROCK`으로 넘기고 키 값은 출력하지 않는다. 실행할 수 있는 명령은 경로 없는 이름의 `aws bedrock-runtime` 추론 4종(옵션은 허용 목록만: `--debug`·`--endpoint-url`·`--no-verify-ssl`·`--ca-bundle`·`--profile` 등은 거부)과 `python`/`python3`/`uv run … python`(`--python`/`-p` 불가)의 `.py` 스크립트뿐이다. 자식 프로세스에는 엔드포인트·프록시·CA·`AWS_CONFIG_FILE` 환경 변수를 넘기지 않는다. `AWS_PROFILE`은 바꾸지 않으므로 키 인증이 적용되지 않으면 읽기 전용 자격 증명으로 실패한다. 가드는 래퍼와 같은 허용 범위(동치 테스트로 고정)로 판정하며, 직접 호출·MCP 호출·다른 경로의 `bedrock_run.py`·정형(`python3 <래퍼> <명령>`) 외 실행·같은 명령의 엔드포인트/프록시/CA/`PATH` 대입·명령 속 `AWS_BEARER_TOKEN_BEDROCK` 언급을 거부한다.
-- Bedrock 래퍼의 알려진 한계: ① 래퍼로 실행한 Python 스크립트는 키가 든 환경 변수를 받으므로, 스크립트 안의 환경 변수 출력·boto3 디버그 로그(`set_stream_logger` 등, 인증 헤더 포함)·다른 Bedrock API 호출은 가드가 볼 수 없다(정책으로만 금지). 따라서 **전용 IAM 사용자의 정책을 `bedrock:InvokeModel`·`bedrock:InvokeModelWithResponseStream`(+ API 키 사용에 필요한 `bedrock:CallWithBearerToken`)으로만 제한하는 것이 실제 방어선**이다. ② 래퍼는 이름과 실제 경로(심볼릭 링크 포함)로 식별해 같은 판정을 적용하지만, 다른 이름으로 복사한 래퍼나 글롭·변수·치환으로 만든 경로(예: `bedrock_run*.py`)는 판정하지 못한다(다른 알려진 한계와 같은 문자열 판정의 한계). ③ 엔드포인트·프록시·`PATH` 등의 변경은 래퍼가 들어간 명령 안의 대입만 문자열로 검출하며, 래퍼가 자식 환경에서 엔드포인트·프록시·CA·`AWS_CONFIG_FILE`·`AWS_DATA_PATH`·`UV_PYTHON`을 제거해 보완한다(`PATH`는 제거하지 않는다).
-- 어느 프로젝트든 `.claude/settings*.json` 수정은 승인 요청.
-- Bash 쓰기 판정은 명령별 쓰기 대상을 hook 입력 cwd와 명령 안의 `cd`·`pushd`·`eval`·`sh -c`를 따라 절대·실제 경로로 바꿔 보호 경로와 비교한다. `cp`·`ln`·`install`·`rsync`는 대상만, `mv`는 원본·대상, `chmod`·`touch`는 경로 인자를 보며, `dd of=`·`curl -o`/`-c`/`-D`·`wget -O`/`-o`/`-a`의 출력 파일도 판정한다. `curl -O`/`-J`/`--remote-name-all`과 `-O` 없는 `wget`은 URL 끝 이름(`wget`은 빈 이름이면 `index.html`)을 저장 폴더(`curl --output-dir`·`wget -P`, 없으면 cwd) 기준으로 판정하고, 저장 폴더가 보호 디렉터리 안이면 이름을 알 수 없어도 승인 요청. `curl --output-dir`이 있으면 `-o` 경로도 그 폴더 기준(절대 경로는 그대로·폴더 앞붙임 둘 다)으로 판정하고, `wget -r`/`-x`/`-p`/`-m`(긴 이름 포함)은 URL 경로가 저장 위치가 되므로 저장 폴더가 보호 경로의 상위·하네스 안이어도 승인 요청. `cp`·`install`·`rsync`는 실제 기록 위치(대상이 디렉터리면 `대상/원본 이름`)도 판정하고, 재귀 복사(`-r`·`-R`·`-a`)는 그 위치가 보호 경로의 상위여도, 원본이 `.`·`dir/.`·끝 `/`(내용 복사)면 대상 자체가 보호 경로의 상위여도 승인 요청(예: `cp -r /tmp/x/. .`를 하네스 안에서, `rsync -a src/ ~/`). 보호 경로의 상위 폴더를 `mv`·`ln`·`chmod`하면 승인 요청. `patch`·`git apply/checkout/restore/stash/reset --hard·--merge·--keep/pull/merge/switch/rebase/cherry-pick/revert/am`은 작업 위치가 보호 경로 안·상위·하네스 안이면(단 `-C` 외 전역 옵션과 `GIT_*` 환경변수 대입이 없는 `git pull --ff-only`·`git pull --ff-only origin main`은 작업 시작 동기화용으로 허용, 작업 위치는 `-C` 뒤 `--work-tree`·`GIT_WORK_TREE` 기준), pull 취득원·상류·hook을 바꾸는 `git remote add/set-url/rename/remove/set-branches`·`git branch -u/--set-upstream-to/-t`·`git config`의 `remote.*`·`branch.*`·`pull.*`·`core.*`·`url.*`·`include*` 쓰기(섹션 변경·`--edit` 포함)는 작업 위치가 하네스 안·보호 경로 상위면, `tar -x`·`unzip`은 보호 디렉터리 안이면 승인 요청.
-- `cd` 대상을 확정할 수 없으면(변수·치환·`cd -` 등) 이후 상대 경로 쓰기는 승인 요청, hook 입력에 cwd가 없으면 보호 이름으로 판정한다. 하네스 저장소 안에서 쓰기 대상에 확장되지 않는 `$변수`가 있으면 승인 요청.
-- 따옴표 구분자 heredoc(`<<'EOF'`) 본문은 `cat`·`tee`·`git commit/tag -F -`(git 메시지의 `$(cat <<'EOF')` 포함)가 데이터로만 읽을 때만 쓰기 판정에서 뺀다. 같은 줄에 프로세스 치환(`>(…)`·`<(…)`)이나 다른 명령으로의 파이프가 있으면 본문도 판정한다. 64KB를 넘는 Bash 명령은 입력 길이에 선형인 거부 판정(비밀 파일 경로 문자열·자격증명 주입·프로필 변경·배포·복호화)만 먼저 하고, 나머지 판정은 하지 않는다. 이때 `aws` 단어나 `.aws` 경로 요소가 있으면 거부, 그 밖에는 승인 요청(Codex는 거부)해 정규식 시간 초과로 판정 없이 실행되는 일을 막는다.
-- 파일 삭제는 임시 디렉터리·검증된 `__pycache__` 밖이면 승인 요청, 비밀 파일(`~/.aws` 허용 목록 외, Codex·Claude 인증 파일) 읽기는 거부, 가드·설정·하네스 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`·`config.local.json`)·인증 갱신 스크립트 수정은 승인 요청.
-- AWS 변경·배포·비밀 출력 명령은 항상 거부한다. `--with-aws`일 때만 프로필을 `aws.profile`로 고정하고, 등록된 환경 이름의 인증 갱신 스크립트 실행을 예외로 허용한다. AWS 모듈 없이도 원시 자격증명 주입(`AWS_ACCESS_KEY_ID=` 등)·자격증명 파일 경로 변경은 거부한다.
+- If the config sidecar (`harness_config.json`) is missing, broken or holds invalid values (including any unexpected exception while reading it), **every tool call is refused** (fail-closed). Claude then cannot fix the hook either, so the user disables it via `/hooks` or similar, or re-runs install.py.
+- Applying `install.py` (`--apply`, including path variants, interpreters, wrappers and inline execution) changes the guard settings, so it requires approval (Codex refuses). In addition to this string detection, install.py's terminal confirmation (refusing non-interactive runs, typing `apply`) is a second line of defense. Both are auxiliary defenses that can be bypassed (see "Known limitations").
+- Forced protective keys in `settings.json` (`env.AWS_PROFILE` with `--with-aws`) are overwritten even when the existing value differs, and the dry-run shows `WARN … will be overwritten` (values are not printed).
+- The credential refresh script is allowed only as a standalone `<aws.assume_role_cmd> --awsEnv <registered environment>` (or with `echo <6 digits> |` input); variable assignments, `env`/`export`, wrappers, interpreters or chaining with other commands require approval. `tools/aws/assume_role.py` reads only the repository's `config.local.json`.
+- AWS refuses anything other than read operations, with one exception: the **four Bedrock model inference calls** (`converse`, `converse-stream`, `invoke-model` and `invoke-model-with-response-stream` of `bedrock-runtime`). The read-only profile has no inference permission, so they are allowed only through `python3 <HARNESS_HOME>/tools/aws/bedrock_run.py <command>`. The wrapper passes the user-created `~/.aws/bedrock_api_key` (a Bedrock API key of a dedicated IAM user, mode 600) as `AWS_BEARER_TOKEN_BEDROCK` and never prints the key. It can only run the four `aws bedrock-runtime` inference commands by bare name (options from an allowlist only; `--debug`, `--endpoint-url`, `--no-verify-ssl`, `--ca-bundle`, `--profile` and the like are refused) and `.py` scripts via `python`/`python3`/`uv run … python` (no `--python`/`-p`). Endpoint, proxy, CA and `AWS_CONFIG_FILE` environment variables are not passed to the child process. `AWS_PROFILE` is not changed, so if key authentication does not apply the call fails with read-only credentials. The guard decides with the same allowance as the wrapper (pinned by equivalence tests) and refuses direct calls, MCP calls, `bedrock_run.py` at other paths, runs other than the canonical form (`python3 <wrapper> <command>`), endpoint/proxy/CA/`PATH` assignments in the same command, and any mention of `AWS_BEARER_TOKEN_BEDROCK` in the command.
+- Known limitations of the Bedrock wrapper: (1) Python scripts run through the wrapper receive the environment variable holding the key, so printing environment variables, boto3 debug logs (`set_stream_logger` etc., which include auth headers) or other Bedrock API calls inside the script are invisible to the guard (forbidden by policy only). **The real line of defense is restricting the dedicated IAM user's policy to `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` (+ `bedrock:CallWithBearerToken` required for API keys).** (2) The wrapper is identified by name and real path (including symlinks) and judged the same way, but a wrapper copied under another name, or paths built with globs, variables or substitutions (e.g. `bedrock_run*.py`), cannot be judged (the same string-matching limitation as the other known limitations). (3) Endpoint, proxy, `PATH` and similar changes are detected as strings only for assignments inside the command containing the wrapper; the wrapper compensates by removing endpoint, proxy, CA, `AWS_CONFIG_FILE`, `AWS_DATA_PATH` and `UV_PYTHON` from the child environment (`PATH` is not removed).
+- Modifying `.claude/settings*.json` in any project requires approval.
+- The Bash write check resolves each command's write targets to absolute real paths, following the hook input cwd and any `cd`, `pushd`, `eval` and `sh -c` inside the command, and compares them with protected paths. `cp`, `ln`, `install` and `rsync` are checked on the destination only, `mv` on source and destination, `chmod` and `touch` on path arguments, and the output files of `dd of=`, `curl -o`/`-c`/`-D` and `wget -O`/`-o`/`-a` are checked too. `curl -O`/`-J`/`--remote-name-all` and `wget` without `-O` are judged by the last URL segment (`index.html` for an empty name with `wget`) relative to the save folder (`curl --output-dir`, `wget -P`, otherwise the cwd); if the save folder is inside a protected directory, approval is required even when the name is unknown. With `curl --output-dir`, `-o` paths are also judged relative to that folder (absolute paths both as-is and prefixed), and `wget -r`/`-x`/`-p`/`-m` (including long names) require approval when the save folder is an ancestor of a protected path or inside the harness, because the URL path becomes the save location. `cp`, `install` and `rsync` are also judged at the actual write location (`destination/source name` when the destination is a directory); recursive copies (`-r`, `-R`, `-a`) require approval when that location is an ancestor of a protected path, and when the source is `.`, `dir/.` or ends in `/` (copying contents), when the destination itself is an ancestor of a protected path (e.g. `cp -r /tmp/x/. .` inside the harness, `rsync -a src/ ~/`). `mv`, `ln` or `chmod` on an ancestor folder of a protected path requires approval. `patch` and `git apply/checkout/restore/stash/reset --hard·--merge·--keep/pull/merge/switch/rebase/cherry-pick/revert/am` require approval when the working location is inside or an ancestor of a protected path or inside the harness (except `git pull --ff-only` and `git pull --ff-only origin main` without global options other than `-C` and without `GIT_*` assignments, which are allowed for start-of-work sync; the working location is taken from `--work-tree` / `GIT_WORK_TREE` after `-C`). Commands that change the pull source, upstream or hooks — `git remote add/set-url/rename/remove/set-branches`, `git branch -u/--set-upstream-to/-t`, and `git config` writes to `remote.*`, `branch.*`, `pull.*`, `core.*`, `url.*` or `include*` (including section changes and `--edit`) — require approval when the working location is inside the harness or an ancestor of a protected path, and `tar -x` / `unzip` require approval inside protected directories.
+- If a `cd` target cannot be determined (variables, substitutions, `cd -`, etc.), later relative-path writes require approval, and when the hook input has no cwd, decisions are made on protected names. Inside the harness repository, a write target containing an unexpanded `$variable` requires approval.
+- The body of a quoted-delimiter heredoc (`<<'EOF'`) is excluded from the write check only when `cat`, `tee` or `git commit/tag -F -` (including `$(cat <<'EOF')` in git messages) read it purely as data. If the same line has process substitution (`>(…)`, `<(…)`) or a pipe to another command, the body is checked too. For Bash commands over 64 KB, only the refusal checks that are linear in input length (secret file path strings, credential injection, profile changes, deployment, decryption) run first and the rest are skipped. In that case the presence of the word `aws` or a `.aws` path element means refusal, and anything else requires approval (Codex refuses), so a regex timeout never lets a command run unjudged.
+- File deletion outside temporary directories and verified `__pycache__` requires approval; reading secret files (outside the `~/.aws` allowlist, Codex and Claude auth files) is refused; modifying the guard, settings or harness sources (`hooks/`, `install/`, `settings/`, `tools/aws/`, `config.local.json`) or the credential refresh script requires approval.
+- AWS change, deployment and secret-printing commands are always refused. Only with `--with-aws` is the profile pinned to `aws.profile` and running the credential refresh script for registered environment names allowed as an exception. Even without the AWS module, raw credential injection (`AWS_ACCESS_KEY_ID=` etc.) and changing credential file paths are refused.
 
-## 이행 시 주의
+## Migration notes
 
-기존 개인 하네스(프로젝트의 `tools/harness/`, 루트 `assume_role.sh`, 프로젝트 `.claude/skills`·`.agents/skills`)는 Git 밖에 있어 이행으로 바뀌는 내용이 이력에 남지 않는다. 이행 전에 그 파일들을 백업하고, 이후 변경은 이 저장소의 Git 이력으로 관리한다. 새 가드는 옛 경로(`tools/harness/`, 루트 `assume_role.sh`)를 보호하지 않으므로, 옛 파일을 남겨 두는 동안은 `extra_protected_paths`에 등록하거나 정리 계획을 세운다(삭제는 사용자가 결정). 기존 `~/.claude/CLAUDE.md`·`~/.codex/AGENTS.md`에 손으로 넣은 같은 절은 dry-run의 `WARN … possible duplicate`를 보고 사용자가 정리한다.
+The previous personal harness (the project's `tools/harness/`, the root `assume_role.sh`, and the project's `.claude/skills` and `.agents/skills`) lives outside Git, so changes made by the migration are not recorded in history. Back those files up before migrating and manage later changes through this repository's Git history. The new guard does not protect the old paths (`tools/harness/`, the root `assume_role.sh`), so while the old files remain, register them in `extra_protected_paths` or plan their cleanup (deletion is the user's decision). If the same sections were added by hand to an existing `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`, the user cleans them up based on the dry-run's `WARN … possible duplicate`.
 
-## 알려진 한계
+## Known limitations
 
-- 가드는 **명령 문자열을 검사하는 보조 방어**이며 완전한 셸 파서가 아니다. 설정 문구나 heredoc 안의 `npm run deploy`, `aws …`로 시작하는 줄, 비밀 파일 경로 문자열 같은 무해한 텍스트도 차단될 수 있다. 차단되면 다른 도구·스크립트로 우회하지 말고 문구를 바꾸거나 파일 편집 도구를 쓴다.
-- Bash 쓰기 대상의 상대 경로는 hook 입력의 cwd(명령 안의 `cd` 포함) 기준으로 해석해 보호 경로와 비교한다. 2026-11-19 이전 가드는 절대 경로 문자열만 판정해, 저장소 폴더 안에서 `sed -i … hooks/guard.py`처럼 상대 경로로 쓰면 승인 없이 통과했다. 지금도 하네스 밖에서 변수·명령 치환으로 만든 경로, 스크립트 파일 안의 경로, `python - <<EOF` 본문의 파일 쓰기는 판정할 수 없고, `awk -i inplace`, `CDPATH`, `source`로 읽은 스크립트 안의 `cd`, `curl`의 그 밖의 출력 옵션(`--trace`·`--etag-save`·`--libcurl` 등)과 URL 글로빙(`{a,b}`·`[1-3]`), `wget`의 긴 옵션 축약(`--output-doc=` 등)과 `-e output_document=…`·`-e dir_prefix=…` 같은 wgetrc 명령도 판정하지 않는다. `tar -x`·`unzip`으로 보호 경로의 상위(예: `-C ~`)에 풀면 판정하지 않는다. 서브셸의 `cd`도 이후 후보에 남기는 등 보수적 판정이라 오탐이 날 수 있다. 그러므로 하네스 파일은 Bash(sed·리다이렉트·heredoc)가 아니라 Edit/Write 도구로만 수정한다.
-- 스크립트 파일 안에 적힌 삭제·SDK 쓰기 코드는 명령 검사로 잡지 못한다(AWS는 프로필 고정과 읽기 전용 역할이 실제 방어선). `python3 -m install.install --apply`, glob(`install/inst*.py`), 저장소를 통째로 복사한 설치기처럼 이름·위치를 바꾼 실행은 문자열 검사로 막지 못한다. 이 경우에도 `--apply`는 터미널 확인을 요구하지만, `script`·`pty`·`expect` 등으로 의사 터미널을 만들어 확인 문구를 넘기면 이 확인도 우회될 수 있다.
-- `HARNESS_HOME`은 Git 저장소라 `git checkout`·`reset`·`stash`·`pull` 등으로 보호 원본(`hooks/`·`install/`·`settings/`·`tools/aws/`)이 바뀔 수 있다. 가드는 작업트리를 바꾸는 `git` 서브커맨드(`apply`·`checkout`·`restore`·`stash`·`reset --hard`류·`pull`·`merge`·`switch`·`rebase`·`cherry-pick`·`revert`·`am`)를 작업 위치 기준으로 승인 요청하지만, 작업 시작 동기화용 `git pull --ff-only`는 허용하므로 origin에 올라간 변경은 승인 없이 작업트리에 들어온다. 그 밖의 서브커맨드(`git worktree`·`git submodule update`·`git bisect` 등)와 alias는 검사하지 않는다. 앞 세그먼트의 `export GIT_DIR=…`처럼 명령 앞 대입이 아닌 환경변수, `GIT_DIR`/`--git-dir`로 지정한 다른 git 디렉터리의 `core.worktree`(작업 위치는 cwd로 판정), 하네스 밖에서 실행한 `git config --global`(예: `url.*.insteadOf`), `.git/config` 직접 편집, `git push -u`/`--set-upstream`에 의한 상류 변경, `-`로 시작하는 값을 쓰는 `git config`(예: `core.pager -R`)도 판정하지 않는다. 단 설치된 hook·설정에 반영되려면 사용자가 터미널에서 `install.py --apply`를 실행해야 한다.
-- hook 인터프리터가 사라지면 Claude는 `guard_hook.sh`가 거부를 반환하지만, Codex는 신뢰 절차 때문에 python을 직접 실행하므로 인터프리터 소실·hook 타임아웃 시 가드 없이 실행될 수 있다. Python을 업그레이드하면 install.py를 다시 실행한다.
-- Codex exec 모드의 일부 도구(node_repl 등 MCP 외 경로)는 hook 범위 밖이다.
-- 가드 메시지·사용량 경고 문구는 한국어로 고정되어 있다.
-- **Windows의 PowerShell 판정(`check_powershell`)** 은 Bash 판정보다 더 단순한 문자열 판정이다. 세그먼트(`;`·`|`·`&&`·`||`·괄호·`$(`) 분리와 간단한 따옴표·백틱 처리만 하고, 변수(`$x`) 경유 경로·스크립트 블록 안의 동작·`.ps1` 파일 내용은 판정하지 못한다. 판정할 수 없는 재해석·별도 프로세스 실행(`Invoke-Expression`·`-EncodedCommand`·`Start-Process`·`cmd /c`·`wsl`)은 승인 요청이다. 외부 명령(git·aws·python 등)은 Bash 판정을 재사용한다. 보호 경로 문자열과 쓰기 cmdlet·`>`가 같은 구간에 있으면 승인 요청으로 보완한다.
-- Windows의 hook은 python을 직접 실행하므로, 인터프리터 경로가 사라지면(Python 제거·업그레이드로 경로 변경) hook 실행 자체가 실패해 Claude가 미판정으로 실행할 수 있다(POSIX의 `guard_hook.sh` 같은 래퍼가 없다). guard.py 안의 예외는 excepthook으로 deny를 반환한다. Python을 바꾸면 `apply.cmd`를 다시 실행한다.
-- Windows의 파일 검사(task_metrics·investigate·repo_context)는 `dir_fd`·`O_NOFOLLOW`가 없어 요소별 `lstat`으로 심볼릭 링크·정션을 거부한 뒤 연다(검사와 open 사이의 바꿔치기는 막지 못한다). OneDrive 클라우드 파일의 재분석 지점은 링크로 보지 않는다. 권한 비트(0600·0700)는 Windows에서 읽기 전용 속성만 의미하므로 `config.local.json`만 `icacls`로 본인 접근으로 제한한다.
-- `skills/handoff`는 MIT 라이선스(원 저작자 표기는 `skills/handoff/LICENSE.txt`)를 따른다.
+- The guard is an **auxiliary defense that inspects command strings**, not a complete shell parser. Harmless text such as `npm run deploy` in a settings string or heredoc, a line starting with `aws …`, or a secret file path string can be blocked. When blocked, do not work around it with another tool or script; rephrase the text or use the file editing tools.
+- Relative write targets in Bash are resolved against the hook input cwd (including `cd` inside the command) and compared with protected paths. Before 2026-11-19 the guard only matched absolute path strings, so writing with a relative path inside the repository folder, such as `sed -i … hooks/guard.py`, passed without approval. Still undetectable: paths built with variables or command substitution outside the harness, paths inside script files, and file writes in a `python - <<EOF` body. Also not checked: `awk -i inplace`, `CDPATH`, `cd` inside scripts loaded with `source`, other `curl` output options (`--trace`, `--etag-save`, `--libcurl`, etc.) and URL globbing (`{a,b}`, `[1-3]`), abbreviated long `wget` options (`--output-doc=` etc.), and wgetrc commands like `-e output_document=…` / `-e dir_prefix=…`. Extracting with `tar -x` or `unzip` into an ancestor of a protected path (e.g. `-C ~`) is not judged. The check is conservative (for example, a `cd` in a subshell stays a candidate afterwards) and can produce false positives. Therefore modify harness files only with the Edit/Write tools, not Bash (sed, redirects, heredocs).
+- Deletion or SDK write code written inside script files cannot be caught by command inspection (for AWS, the pinned profile and read-only role are the real defense). Renamed or relocated runs such as `python3 -m install.install --apply`, globs (`install/inst*.py`) or a copied installer are not stopped by string checks. `--apply` still requires terminal confirmation in those cases, but a pseudo-terminal created with `script`, `pty`, `expect` and similar can bypass that confirmation too.
+- `HARNESS_HOME` is a Git repository, so `git checkout`, `reset`, `stash`, `pull` and similar can change protected sources (`hooks/`, `install/`, `settings/`, `tools/aws/`). The guard requires approval for `git` subcommands that change the working tree (`apply`, `checkout`, `restore`, `stash`, `reset --hard` and the like, `pull`, `merge`, `switch`, `rebase`, `cherry-pick`, `revert`, `am`) based on the working location, but `git pull --ff-only` for start-of-work sync is allowed, so changes pushed to origin enter the working tree without approval. Other subcommands (`git worktree`, `git submodule update`, `git bisect`, etc.) and aliases are not checked. Also not judged: environment variables that are not prefix assignments, such as `export GIT_DIR=…` in an earlier segment; `core.worktree` of another git directory specified with `GIT_DIR` / `--git-dir` (the working location is judged by the cwd); `git config --global` run outside the harness (e.g. `url.*.insteadOf`); direct edits of `.git/config`; upstream changes via `git push -u` / `--set-upstream`; and `git config` with values starting with `-` (e.g. `core.pager -R`). For any of this to reach the installed hooks and settings, however, the user must run `install.py --apply` in a terminal.
+- If the hook interpreter disappears, Claude's `guard_hook.sh` returns a refusal, but Codex runs python directly because of its trust procedure, so a missing interpreter or a hook timeout can let it run without the guard. Re-run install.py after upgrading Python.
+- Some tools in Codex exec mode (paths other than MCP such as node_repl) are outside the hooks' scope.
+- Guard messages and usage warnings are fixed in Korean.
+- **The PowerShell check on Windows (`check_powershell`)** is a simpler string check than the Bash check. It only splits segments (`;`, `|`, `&&`, `||`, parentheses, `$(`) and handles simple quotes and backticks; it cannot judge paths via variables (`$x`), actions inside script blocks or the contents of `.ps1` files. Reinterpretation or separate-process execution that cannot be judged (`Invoke-Expression`, `-EncodedCommand`, `Start-Process`, `cmd /c`, `wsl`) requires approval. External commands (git, aws, python, etc.) reuse the Bash check. When a protected path string and a write cmdlet or `>` appear in the same segment, approval is required as a compensating measure.
+- Hooks on Windows run python directly, so if the interpreter path disappears (Python removed or the path changed by an upgrade), the hook itself fails and Claude may run commands unjudged (there is no wrapper like POSIX's `guard_hook.sh`). Exceptions inside guard.py return deny via an excepthook. Re-run `apply.cmd` after changing Python.
+- File checks on Windows (task_metrics, investigate, repo_context) have no `dir_fd` or `O_NOFOLLOW`, so they refuse symlinks and junctions with a per-element `lstat` before opening (a swap between the check and the open cannot be prevented). Reparse points of OneDrive cloud files are not treated as links. Permission bits (0600, 0700) mean only the read-only attribute on Windows, so only `config.local.json` is restricted to owner access via `icacls`.
+- `skills/handoff` is under the MIT license (original author attribution in `skills/handoff/LICENSE.txt`).
