@@ -1701,6 +1701,55 @@ class LosslessReuseTests(Base):
             self.assertFalse(co.lossless_check(session, 'fidelity', plain, broken, allow_selective=False)['ok'])
         self.assertTrue(co.lossless_check(session, 'fidelity', plain, packed, allow_selective=False)['ok'])
 
+    def test_captures_compared_per_evidence_not_as_one_string(self):
+        # 基準は大きな根拠 E2 を容量で省き後続の E3 を含め、圧縮本は余裕があり E2 も含める（実セッションで起きた形）。
+        sid, session = self.ready()
+        title = 'CLAUDE EVIDENCE CAPTURES (frozen text of each E<n>)'
+        e1, e2, e3 = '[E1] a.py:L1-L1\nsmall', '[E2] b.py:L1-L9\n' + 'x' * 500, '[E3] c.py:L1-L1\nsmall3'
+        pieces = [('E1', e1), ('E2', e2), ('E3', e3)]
+
+        def with_captures(request, body):
+            blocks = co.request_blocks(request)
+            self.assertIn(title, blocks)
+            return request.replace(co.block(title, blocks[title]), co.block(title, body))
+
+        with patch.object(co, 'evidence_capture_pieces', return_value=pieces):
+            plain = with_captures(co.build_request(session, 'debate', compact=False), co.render_captures([e1, e3], ['E2']))
+            packed = co.build_request(session, 'debate')
+            superset = with_captures(packed, co.render_captures([e1, e2, e3], []))
+            self.assertTrue(co.lossless_check(session, 'debate', plain, superset)['ok'])
+            same = with_captures(packed, co.render_captures([e1, e3], ['E2']))
+            self.assertTrue(co.lossless_check(session, 'debate', plain, same)['ok'])
+            for broken in (co.render_captures([e1, e2], ['E3']),            # 基準にあった E3 が落ちた
+                           co.render_captures([e1, e2, e3.replace('small3', 'other')], []),  # 原文改変
+                           co.render_captures([e1], ['E2', 'E3']),          # 省略が増えた
+                           co.render_captures([e1, e2, e3], []) + '\ninjected',  # 末尾への余分な文字
+                           'injected\n' + co.render_captures([e1, e2, e3], []),  # 先頭への注入
+                           co.render_captures([e1, 'injected', e2, e3], []),    # 途中への注入
+                           co.render_captures([e3, e1], ['E2']),            # 順序の入れ替え
+                           co.render_captures([e1, e3], ['E2', 'E9'])):     # 存在しない省略 ID の偽装
+                report = co.lossless_check(session, 'debate', plain, with_captures(packed, broken))
+                self.assertFalse(report['ok'], broken[-40:])
+                self.assertIn(title, report['content_mismatch'])
+            missing = packed.replace(co.block(title, co.request_blocks(packed)[title]), '')
+            self.assertIn(title, co.lossless_check(session, 'debate', plain, missing)['content_mismatch'])
+            # 全件省略は省略案内の一致で受け入れる。
+            self.assertEqual(co.captured_ids(co.render_captures([], ['E1', 'E2', 'E3']), pieces), set())
+        # 根拠が 0 件なら両方 '(none)' で受け入れ、根拠があるのに '(none)' なら再構成できない。
+        self.assertEqual(co.captured_ids('(none)', []), set())
+        self.assertIsNone(co.captured_ids('(none)', pieces))
+
+    def test_real_capture_output_reconstructs_with_and_without_omission(self):
+        # patch せず、実際の evidence_captures 出力（容量不足の省略を含む）が根拠片で再構成できることを確かめる。
+        sid, session = self.ready()
+        pieces = co.evidence_capture_pieces(session, 'debate')
+        self.assertTrue(pieces)
+        full = co.evidence_captures(session, 'debate')
+        self.assertEqual(co.captured_ids(full, pieces), {ident for ident, _ in pieces})
+        starved = co.evidence_captures(session, 'debate', limit=0)
+        self.assertIn('capture omitted for size', starved)
+        self.assertEqual(co.captured_ids(starved, pieces), set())
+
     def test_conditional_default_keeps_all_issues_and_conditions(self):
         sid, _ = CompactTests.session_with_unrelated_issue(self)
         session = self.env.session(sid)

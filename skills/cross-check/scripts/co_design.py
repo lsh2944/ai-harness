@@ -2495,30 +2495,54 @@ def reuse_evidence(session):
     return result
 
 
-def evidence_captures(session, phase, limit=MAX_CAPTURES):
-    """Claude 根拠の凍結原文。経路だけでは Codex が読めない（作業領域外・更新後の差異）ため原文を渡す。
-    round2 の新規根拠は NEW EVIDENCE 側で送る。上限を超えた分は登録情報だけにし、その旨を明記する。"""
+def evidence_capture_pieces(session, phase):
+    """送信対象になりうる Claude 根拠の原文片（[E<n>] 見出し付き）を登録順に返す。上限による取捨はしない。"""
     sid = session['sid']
     cutoff = debate_ended_at(session) if phase == 'round2' else float('inf')
-    texts, used, omitted = [], 0, []
-    # 省略 ID 行（ID 1 件 7 バイト以内、件数分）を先に見込み、区切りの改行も数える。
-    budget = limit - 160 - 7 * len(session['evidence'])
+    pieces = []
     for entry in session['evidence']:
         if entry['added_at'] > cutoff:
             continue
         text = claude_evidence_text(sid, entry['id'])
         text = '(capture unavailable)' if text is None else text
-        piece = f'[{entry["id"]}] {normalize_path(entry["path"])}:L{entry["lines"][0]}-L{entry["lines"][1]}\n{text}'
-        size = len(piece.encode('utf-8')) + 1
-        if used + size > budget:
-            omitted.append(entry['id'])
-            continue
-        texts.append(piece)
-        used += size
+        pieces.append((entry['id'], f'[{entry["id"]}] {normalize_path(entry["path"])}:L{entry["lines"][0]}-L{entry["lines"][1]}\n{text}'))
+    return pieces
+
+
+def render_captures(included, omitted):
+    """原文片と省略 ID から CLAUDE EVIDENCE CAPTURES の本文を組み立てる（送信と整合性検査で同じ形を使う）。"""
+    texts = list(included)
     if omitted:
         texts.append('(capture omitted for size; use the registry path only if it is inside the working root: '
                      + ', '.join(omitted) + ')')
     return '\n'.join(texts) or '(none)'
+
+
+def evidence_captures(session, phase, limit=MAX_CAPTURES):
+    """Claude 根拠の凍結原文。経路だけでは Codex が読めない（作業領域外・更新後の差異）ため原文を渡す。
+    round2 の新規根拠は NEW EVIDENCE 側で送る。上限を超えた分は登録情報だけにし、その旨を明記する。"""
+    texts, used, omitted = [], 0, []
+    # 省略 ID 行（ID 1 件 7 バイト以内、件数分）を先に見込み、区切りの改行も数える。
+    budget = limit - 160 - 7 * len(session['evidence'])
+    for ident, piece in evidence_capture_pieces(session, phase):
+        size = len(piece.encode('utf-8')) + 1
+        if used + size > budget:
+            omitted.append(ident)
+            continue
+        texts.append(piece)
+        used += size
+    return render_captures(texts, omitted)
+
+
+def captured_ids(body, pieces):
+    """CAPTURES 本文を正規の原文片だけで完全に再構成できるときに、含まれる E ID を返す。
+    再構成できない（改変・欠落・余分な文字がある）ときは None を返す。"""
+    included = [(ident, piece) for ident, piece in pieces if piece in body]
+    kept = {ident for ident, _ in included}
+    omitted = [ident for ident, _ in pieces if ident not in kept]
+    if render_captures([piece for _, piece in included], omitted) != body:
+        return None
+    return kept
 
 
 def debate_ended_at(session):
@@ -4538,8 +4562,16 @@ def lossless_check(session, phase, baseline, compact, allow_selective=True):
                 report['content_mismatch'].append(title)
         except (KeyError, SchemaError, TypeError):
             report['content_mismatch'].append(title)
-    for title in ('CLAUDE EVIDENCE CAPTURES (frozen text of each E<n>)',
-                  'VERIFIED REUSE EVIDENCE (after reveal; current hash checked)'):
+    captures = 'CLAUDE EVIDENCE CAPTURES (frozen text of each E<n>)'
+    if captures in original_blocks:
+        # 基準と圧縮本は残り容量が違うため、収まる根拠の組み合わせが変わる（基準で省いた大きな根拠を圧縮本では含めるなど）。
+        # 連結文字列の部分一致ではなく根拠片ごとに、基準に含まれた原文が圧縮本にも改変なく全部あることを確かめる。
+        pieces = evidence_capture_pieces(session, phase)
+        before = captured_ids(original_blocks[captures], pieces)
+        after = captured_ids(blocks.get(captures, ''), pieces)
+        if before is None or after is None or not before <= after:
+            report['content_mismatch'].append(captures)
+    for title in ('VERIFIED REUSE EVIDENCE (after reveal; current hash checked)',):
         if title in original_blocks:
             original = original_blocks[title].split('(capture omitted for size;', 1)[0].rstrip()
             if original and original not in blocks.get(title, ''):
