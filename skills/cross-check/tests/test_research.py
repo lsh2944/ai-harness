@@ -137,6 +137,8 @@ class ProposalResearchTests(ResearchBase):
         self.assertIn('1~3문장', prompt)
         self.assertIn('여러 필드에 반복하지 말고', prompt)
         self.assertIn('항목 자체는 생략하지 마세요', prompt)
+        # 本文参照で local キーを使うと prepare が拒否するため、使ってよい位置を明示する。
+        self.assertIn('local:<key>는 evidence id와 manifest에만', prompt)
         self.assertNotIn('축약하지 마세요', prompt)
         self.assertNotIn('모두 보존', prompt)
 
