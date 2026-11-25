@@ -130,6 +130,16 @@ class ProposalResearchTests(ResearchBase):
         text = co.build_request(self.env.session(sid), 'proposal')
         self.assertIn('Write every free-text value in the JSON in English', text)
 
+    def test_architect_prompt_asks_concise_items_without_dropping_them(self):
+        # 出力量を抑える指示（1~3文・重複禁止）と、項目自体は落とさない指示の両方を持つ。
+        sid = self.env.to_inputs_frozen()
+        prompt = self.env.ok('architect-prompt', '--session', sid)['architect_prompt']
+        self.assertIn('1~3문장', prompt)
+        self.assertIn('여러 필드에 반복하지 말고', prompt)
+        self.assertIn('항목 자체는 생략하지 마세요', prompt)
+        self.assertNotIn('축약하지 마세요', prompt)
+        self.assertNotIn('모두 보존', prompt)
+
 
 class ResearchCheckTests(ResearchBase):
     def revealed(self):
