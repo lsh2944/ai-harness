@@ -722,6 +722,122 @@ class ArchitectCaptureTests(SubmissionBase):
         self.capture(sid, link, expected=False)
 
 
+class ArchitectEventCaptureTests(SubmissionBase):
+    """永続 transcript がない呼出しでも既存完了通知を機械的に保存する。"""
+
+    proposed = ArchitectCaptureTests.proposed
+
+    def events(self, body='{}'):
+        common = {'type': 'system', 'task_id': 'a1', 'session_id': 'caller1',
+                  'tool_use_id': 'tool1', 'run_id': 'run1'}
+        return [dict(common, subtype='task_started', task_type='local_agent', subagent_type='architect'),
+                dict(common, subtype='task_notification', status='completed', handback='send',
+                     handback_report={'text': body})]
+
+    def event_capture(self, sid, entries, expected=True, raw=None, extra=()):
+        stream = self.location('events.jsonl')
+        stream.write_bytes(raw if raw is not None else ''.join(json.dumps(e, ensure_ascii=False) + '\n'
+                           for e in entries).encode('utf-8'))
+        out = self.location('captured.json')
+        before, calls, session_before = self.snapshot(), self.env.calls(), self.env.session(sid)
+        result, code = self.env.run('proposal', 'capture', '--session', sid, '--agent-events', stream,
+                                   '--agent-id', 'a1', '--caller-session-id', 'caller1', '--out', out, *extra)
+        self.assertEqual(code, 0 if expected else 2, result)
+        self.assertEqual(self.env.session(sid), session_before)
+        self.assertEqual(self.env.calls(), calls)
+        if not expected:
+            self.assertFalse(out.exists())
+            self.assertEqual(self.snapshot(), before)
+        return result, out
+
+    def test_events_preserve_full_handoff_through_prepare_and_freeze(self):
+        sid = self.proposed()
+        message = ProposalHandoffTests.single_observation_message(self)
+        body = ' \r\n' + json.dumps(message, ensure_ascii=False, indent=2).replace('\n', '\r\n')
+        entries = self.events(body)
+        other = self.events('wrong agent')
+        for entry in other:
+            entry['task_id'] = 'other'
+        result, out = self.event_capture(sid, other + entries)
+        self.assertEqual(out.read_bytes(), body.encode('utf-8'))
+        self.assertEqual(result['sha256'], co.sha256(body.encode('utf-8')))
+        prepared = self.env.ok('proposal', 'prepare', '--session', sid, '--file', out,
+                               '--out', self.location('proposal.json'))
+        self.env.ok('freeze', '--session', sid, '--side', 'claude', '--file', prepared['path'])
+        frozen = co.read_json_artifact(sid, 'claude/proposal.json')
+        expected = copy.deepcopy(message['proposal'])
+        expected['evidence'][0]['id'] = prepared['evidence_mapping']['local:source_a']
+        self.assertEqual(frozen, expected)
+
+    # ProposalHandoffTests の生成処理だけ再利用し、追加 AI や実行系は使わない。
+    message = ProposalHandoffTests.message
+
+    def test_malformed_body_is_preserved_not_repaired(self):
+        sid = self.proposed()
+        for body in ['説明\r\n```json\n{}', '{"text":"한글 ``` agentId: x"}', '{}\n']:
+            with self.subTest(body=body):
+                _, out = self.event_capture(sid, self.events(body))
+                self.assertEqual(out.read_bytes(), body.encode('utf-8'))
+                result, code = self.env.run('proposal', 'prepare', '--session', sid, '--file', out,
+                                            '--out', self.location('proposal.json'))
+                self.assertEqual(code, 2, result)
+                self.assertEqual(out.read_bytes(), body.encode('utf-8'))
+
+    def test_wrong_incomplete_ambiguous_and_broken_events_are_refused(self):
+        sid = self.proposed()
+        cases = [[], self.events()[:1], self.events()[1:], self.events() + self.events()[1:]]
+        for index, key, value in [(0, 'subagent_type', 'other'), (1, 'status', 'failed'),
+                                  (1, 'tool_use_id', 'other'), (1, 'run_id', 'other'),
+                                  (1, 'session_id', 'other'), (1, 'task_id', 'other'),
+                                  (1, 'handback', 'none'), (1, 'handback_report', {}),
+                                  (1, 'handback_report', {'text': 1})]:
+            entries = self.events()
+            entries[index][key] = value
+            cases.append(entries)
+        for index, entries in enumerate(cases):
+            with self.subTest(case=index):
+                self.event_capture(sid, entries, expected=False)
+        good = ''.join(json.dumps(e) + '\n' for e in self.events()).encode()
+        for raw in [good + b'{', b'broken\n' + good, good + b'{"type":1,"type":2}\n']:
+            with self.subTest(raw=raw[-30:]):
+                self.event_capture(sid, [], expected=False, raw=raw)
+
+    def test_event_mode_preserves_existing_state_and_source_limits(self):
+        self.event_capture(self.env.to_inputs_frozen(), self.events(), expected=False)
+        sid = self.proposed()
+        with patch.object(co.HANDOFF, 'AGENT_OUTPUT_MAX', 10):
+            self.event_capture(sid, self.events(), expected=False)
+        self.env.edit_session(sid, proposal_handoff={'source_sha256': 'x'})
+        self.event_capture(sid, self.events(), expected=False)
+
+    def test_event_cli_paths_and_existing_output_are_not_bypassed(self):
+        sid = self.proposed()
+        stream = self.location('events.jsonl')
+        stream.write_text(''.join(json.dumps(e) + '\n' for e in self.events()))
+        out = self.location('output.json')
+        base = ['proposal', 'capture', '--session', sid, '--out', out]
+        valid = ['--agent-id', 'a1', '--caller-session-id', 'caller1']
+        for args in [base + ['--agent-events', stream],
+                     base + ['--agent-events', 'relative.jsonl'] + valid]:
+            result, code = self.env.run(*args)
+            self.assertEqual(code, 2, result)
+            self.assertFalse(out.exists())
+        with self.assertRaises(SystemExit) as error:
+            self.env.run(*base, '--agent-events', stream, '--agent-output', '/tmp/unused.output', *valid)
+        self.assertEqual(error.exception.code, 2)
+        linked = self.location('linked.jsonl')
+        linked.symlink_to(stream)
+        outside = self.env.root / 'outside.jsonl'
+        outside.write_bytes(stream.read_bytes())
+        for source in [linked, outside]:
+            result, code = self.env.run(*base, '--agent-events', source, *valid)
+            self.assertEqual(code, 2, result)
+            self.assertFalse(out.exists())
+        out.write_text('keep')
+        result, code = self.env.run(*base, '--agent-events', stream, *valid)
+        self.assertEqual((code, out.read_text()), (2, 'keep'), result)
+
+
 if __name__ == '__main__':
     import unittest
     unittest.main()

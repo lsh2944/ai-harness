@@ -3060,7 +3060,9 @@ def cmd_proposal(args):
     sid = sid_check(args.session)
     with locked_session(sid) as session:
         if args.action == 'capture':
-            return HANDOFF.capture(SimpleNamespace(**globals()), session, args.agent_output, args.out), 0
+            return HANDOFF.capture(SimpleNamespace(**globals()), session, args.agent_output, args.out,
+                                   agent_events=args.agent_events, agent_id=args.agent_id,
+                                   caller_session_id=args.caller_session_id), 0
         return HANDOFF.prepare(SimpleNamespace(**globals()), session, args.file, args.out), 0
 
 
@@ -4826,7 +4828,11 @@ def parser():
     actions = p.add_subparsers(dest='action', required=True)
     capture = actions.add_parser('capture', help='save the architect final message verbatim from the Agent output_file (no registration)')
     capture.add_argument('--session', required=True)
-    capture.add_argument('--agent-output', required=True, help='absolute output_file returned by the Agent tool')
+    capture_source = capture.add_mutually_exclusive_group(required=True)
+    capture_source.add_argument('--agent-output', help='absolute output_file returned by the Agent tool')
+    capture_source.add_argument('--agent-events', help='existing caller stream-json file inside the current project')
+    capture.add_argument('--agent-id', help='exact architect task id returned by the Agent tool (events mode)')
+    capture.add_argument('--caller-session-id', help='exact caller Claude session id (events mode)')
     capture.add_argument('--out', required=True, help='new separate message file inside the current project')
     prepare = actions.add_parser('prepare')
     prepare.add_argument('--session', required=True)

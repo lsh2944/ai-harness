@@ -27,7 +27,12 @@ P1-b 위임은 입력 동결 직후 `architect-prompt`(호환: Codex 종료 후 
 
 메인은 architect **최종 응답 텍스트 전체를 그대로 한 번 저장**한다. 실제 응답 앞뒤 설명·코드 펜스·공백도 포함하며 JSON 부분만 추출하거나 다시 직렬화하지 않는다. 도구의 transport metadata는 응답 본문이 아니므로 포함하지 않는다. 이후 원본 파일은 편집·삭제하지 않는다. strict JSON parser는 앞뒤 설명·펜스가 있으면 등록 전에 거부한다. 메인은 원문과 오류를 보존하고 중단·보고하며, 설명을 버리거나 JSON 내부로 옮기거나 새 architect를 자동 호출하지 않는다. JSON만 생성하도록 도구 수준에서 강제하거나 최초 저장이 실제 응답과 같은지 자동 인증하는 기능은 아니다. `proposal prepare`가 허용하는 변환은 선언된 file evidence ID의 기계 연결뿐이다. runner가 만드는 prepared JSON의 들여쓰기·key 순서는 달라도 되지만 값·항목·배열 순서·문자열 내부의 공백·개행·근거·조건·위험·대안·미확인은 바꾸지 않는다.
 
-저장은 Codex 제안이 끝난 뒤 `proposal capture --agent-output <Agent 결과의 output_file>`로 한다. capture는 그 transcript의 마지막 `SubagentHandback` 메시지(없으면 마지막 텍스트)를 문자 추가 없이 새 파일에 쓰고 등록·동결은 하지 않는다. capture가 메시지를 찾지 못해 거부하면 아래 규칙대로 직접 저장한다. 직접 저장할 때는 Agent 결과에서 **실제 응답 본문 text block**을 복사한다. 본문과 별도 block으로 전달된 `agentId`·`usage` 같은 transport metadata는 섞지 않는다. 초기 user prompt를 최종 응답으로 착각하거나, 본문 안에서 metadata처럼 보이는 문자열을 지우지 않는다. 본문 구분이 불명확하면 임의로 합치거나 잘라내지 말고 판단 전 사용자 확인 규칙을 따른다.
+저장은 Codex 제안과 architect가 모두 끝난 뒤 `proposal capture`로 한다. 메인은 원문 전체를 Write·셸 인자·스크립트 문자열로 다시 출력하지 않는다. 실행 전에 이용 가능한 입력 경로를 정한다.
+
+- 일반 실행은 `proposal capture --agent-output <Agent 결과의 output_file>`을 쓴다. 기존 transcript의 마지막 `SubagentHandback` 메시지(없으면 마지막 텍스트)를 그대로 저장하며, 본문 안에서 metadata처럼 보이는 문자열을 지우지 않는다.
+- `--no-session-persistence` 등 transcript가 남지 않는 실행은 **호출자가 이미 현재 PROJECT 안에 저장 중인 원본 stream-json 파일**이 있을 때 `--agent-events <절대경로> --agent-id <Agent task_id> --caller-session-id <호출자 Claude session_id>`를 쓴다. 호출자는 실행 시작 전에 stdout 저장 경로를 메인에 알려 주고, 완료 이벤트까지 기록해야 한다. 메인이 로그를 재작성하거나 별도 Claude를 실행해 수집하지 않는다. runner는 지정 세션·agent의 architect 시작/완료 이벤트와 tool_use_id·run_id를 대조하고, 완료된 `handback_report.text`만 UTF-8로 저장한다. 다른 agent·user prompt·transport metadata를 본문에 섞지 않는다. 문자열 안의 metadata처럼 보이는 내용은 그대로다. 이벤트 파손·중복·실패·미완료·본문 누락은 거부하며 추측하지 않는다.
+
+두 모드 모두 개행 추가·strip·JSON 재직렬화 없이 새 파일에 쓰며 등록·동결하지 않는다. 기계적으로 이용 가능한 원문이 없거나 capture가 거부되면 **중단·보고**한다. 다른 경로로 거부를 우회하거나 메인의 수동 재출력으로 복구하지 않는다. 다음 실행에 필요한 원문 저장 조건만 알리고 자동 재실행하지 않는다. 로컬 이벤트 파일은 호출자가 제공한 입력이며 진짜 CLI 출력이라는 암호학적 인증은 아니다. 그 파일을 AI가 작성한 사본으로 대체하지 않는다.
 
 **문자 추가도 금지한다.** 끝 개행(LF/CRLF)·닫는 코드펜스·따옴표·괄호를 붙이지 않고 들여쓰기·줄바꿈도 정규화하지 않는다. JSON 뒤에 개행이 없는 응답은 그대로 개행 없이 저장한다. 설명·열린 코드펜스·JSON으로 끝나 닫는 펜스가 없는 잘못된 응답도 **펜스를 닫아 주지 않고 있는 그대로** 저장한다. 이는 Markdown 문서 편집이 아니다. 오류는 원본 보존 후 prepare의 strict 검증으로 보고하며, 원문을 고쳐 다시 제출하지 않는다. 원문 문자열 내부의 코드펜스·공백·Unicode도 그대로 유지한다.
 
@@ -37,4 +42,4 @@ P1-b 위임은 입력 동결 직후 `architect-prompt`(호환: Codex 종료 후 
 
 JSON 문법·배열 타입·ID·ref·hash 오류가 있으면 원본과 오류 경로를 보존하고 **중단·보고**한다. 메인이 객체를 문자열로 재해석하거나, 근거 삭제·kind 승격·요약·의미 재작성·수동 evidence add/freeze 우회로 해결하지 않는다. 자동 architect 재호출·새 세션 재시도도 하지 않는다. 새로운 architect 응답이 필요한 경우 사용자에게 필요한 형식 수정과 의미 변경 여부를 구분해 알린다.
 
-성공하면 runner는 제출 원문을 private work에 고정 보관하고 원문·prepared hash를 기록한다. 메인은 반환된 초안을 변경 없이 freeze한다. prepare 세션은 `--normalize-refs`가 있어도 이미 유효한 ref를 원문 그대로 유지하며, prepare 미사용 legacy의 기존 정규화는 유지한다. runner는 원본 파일/고정 사본의 hash와 ID 연결만 적용한 전체 제안을 검사하므로 prepare 후 근거 삭제·재작성·다른 내용 제출은 거부된다. **최초 저장 전에 메인이 실제 architect 메시지를 바꿨는지는 이 검사로 증명하지 못한다.** 이 구간은 원문 복사 규칙에 의존하며 transcript 수집·추가 AI 호출·훅 변경은 도입하지 않는다. prepare 미사용 legacy API는 유지하되 이 모드에서 오류 복구용 fallback으로 사용하지 않는다.
+성공하면 runner는 제출 원문을 private work에 고정 보관하고 원문·prepared hash를 기록한다. 메인은 반환된 초안을 변경 없이 freeze한다. prepare 세션은 `--normalize-refs`가 있어도 이미 유효한 ref를 원문 그대로 유지하며, prepare 미사용 legacy의 기존 정규화는 유지한다. runner는 원본 파일/고정 사본의 hash와 ID 연결만 적용한 전체 제안을 검사하므로 prepare 후 근거 삭제·재작성·다른 내용 제출은 거부된다. capture는 선택한 원본의 메시지를 기계적으로 저장하지만 그 입력 파일의 생성 주체까지 인증하지는 않는다. 전역 transcript 검색·추가 AI 호출·훅 변경은 도입하지 않는다. prepare 미사용 legacy API는 유지하되 이 모드에서 오류 복구용 fallback으로 사용하지 않는다.

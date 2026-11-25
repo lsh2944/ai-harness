@@ -82,7 +82,7 @@ def scaffolded(env):
     report = Path(final['report']).read_text()
     headings = [line.split('.')[0] for line in report.splitlines() if line.startswith('## ')]
     return {'steps': steps, 'next': validated['next'], 'state': env.session(sid)['state'],
-            'report_sections': len(headings), 'report_in_order': headings == [f'## {n}' for n in range(1, 11)],
+            'report_sections': len(headings), 'report_in_order': headings == [f'## {n}' for n in range(1, 12)],
             'drafts': sorted(p.name for p in root.glob('*.draft.json'))}
 
 
@@ -117,7 +117,7 @@ def main():
                             == ('STOPPED', 'INDEPENDENCE', True, 'REFUSED', ['proposal']),
         'scaffold drafts rejected until filled, Codex text verbatim': all(d['steps'].values()) and d['drafts'] == [
             'ledger.final.draft.json', 'ledger.pre-debate.draft.json', 'synthesis.draft.json'],
-        'report.md generated (10 sections, A/B/scaffold)': d['report_in_order'] and d['state'] == 'FINALIZED'
+        'report.md generated (11 sections, A/B/scaffold)': d['report_in_order'] and d['state'] == 'FINALIZED'
                                                           and not a['missing_artifacts'] and not b['missing_artifacts'],
     }
     for name, ok in checks.items():

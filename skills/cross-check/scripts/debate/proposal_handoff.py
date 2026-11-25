@@ -17,7 +17,7 @@ AGENT_OUTPUT_MAX = 32 * 1024 * 1024
 def agent_message(co, agent_output):
     """architect の transcript から最終報告を原文のまま取り出す（SubagentHandback 優先、なければ最後の text）。
 
-    形式は公開仕様ではないので、見つからなければ推測せず拒否する（主側の手動保存は従来どおり使える）。
+    形式は公開仕様ではないので、見つからなければ推測・再転記せず拒否する。
     """
     given = Path(agent_output)
     if not given.is_absolute():
@@ -49,7 +49,7 @@ def agent_message(co, agent_output):
             chunks.append(chunk)
             total += len(chunk)
         if total > AGENT_OUTPUT_MAX:
-            raise co.Refused('agent output transcript is larger than 32 MiB; save the response manually and report')
+            raise co.Refused('agent output transcript is larger than 32 MiB; preserve it and report, do not retype')
     finally:
         os.close(fd)
     handback = text = None
@@ -61,7 +61,7 @@ def agent_message(co, agent_output):
         except ValueError:
             # 壊れた行を飛ばすと直前の別応答を黙って保存しうるので推測せず拒否する。
             raise co.Refused(f'agent output transcript line {number} is not valid JSON; do not guess, '
-                             'save the response manually and report') from None
+                             'preserve the response and report, do not retype') from None
         if not isinstance(entry, dict) or entry.get('type') != 'assistant':
             continue
         content = (entry.get('message') or {}).get('content') if isinstance(entry.get('message'), dict) else None
@@ -78,10 +78,61 @@ def agent_message(co, agent_output):
         return handback, 'SubagentHandback'
     if text is not None:
         return text, 'text'
-    raise co.Refused('no final architect message found in the agent output; do not guess, save the response manually and report')
+    raise co.Refused('no final architect message found in the agent output; do not guess or retype, report')
 
 
-def capture(co, session, agent_output, output):
+def event_message(co, events, agent_id, caller_session_id):
+    """既存の呼出元 stream-json の完了通知だけから取り出す。モデルによる再転記はしない。"""
+    if (not isinstance(agent_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', agent_id)
+            or not isinstance(caller_session_id, str) or not caller_session_id.strip()):
+        raise co.Refused('event capture requires the Agent task id and caller session id')
+    path = Path(events)
+    if not path.is_absolute() or not co._within(path.resolve(), co.PROJECT.resolve()):
+        raise co.Refused('agent events must be an absolute path inside the current project')
+    raw, _, _ = co.read_source(path, AGENT_OUTPUT_MAX)
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate event key')
+            result[key] = value
+        return result
+
+    started = completed = None
+    for number, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line, object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError):
+            raise co.Refused(f'agent events line {number} is not valid JSON; preserve the stream and report') from None
+        if not isinstance(entry, dict):
+            raise co.Refused('agent events must contain JSON objects')
+        if entry.get('session_id') != caller_session_id or entry.get('task_id') != agent_id:
+            continue
+        if entry.get('type') != 'system':
+            continue
+        if entry.get('subtype') == 'task_started':
+            if (started is not None or completed is not None or entry.get('task_type') != 'local_agent'
+                    or entry.get('subagent_type') != 'architect' or not entry.get('tool_use_id')
+                    or not entry.get('run_id')):
+                raise co.Refused('ambiguous or non-architect task start in agent events')
+            started = entry
+        elif entry.get('subtype') == 'task_notification':
+            report = entry.get('handback_report')
+            if (started is None or completed is not None or entry.get('status') != 'completed'
+                    or entry.get('tool_use_id') != started['tool_use_id']
+                    or entry.get('run_id') != started['run_id']
+                    or entry.get('handback') != 'send' or not isinstance(report, dict)
+                    or not isinstance(report.get('text'), str) or not report['text'].strip()):
+                raise co.Refused('missing, ambiguous or unsuccessful architect completion in agent events')
+            completed = report['text']
+    if completed is None:
+        raise co.Refused('no completed architect handback in the selected stream; do not retype or guess')
+    return completed, 'task_notification.handback_report.text'
+
+
+def capture(co, session, agent_output, output, *, agent_events=None, agent_id=None, caller_session_id=None):
     """architect の最終報告を、文字を足さず新しい別ファイルに 1 回だけ保存する。登録・凍結はしない。"""
     sid = session['sid']
     co.require_state(session, 'CODEX_PROPOSED')
@@ -90,11 +141,16 @@ def capture(co, session, agent_output, output):
     call = co.phase_call(session, 'proposal')
     if not call or not call.get('ended_at') or call.get('execution') != 'ok':
         raise co.Refused('capture requires a successfully completed Codex proposal; wait for it before saving the architect response')
-    message, source = agent_message(co, agent_output)
+    if agent_events is not None:
+        message, source = event_message(co, agent_events, agent_id, caller_session_id)
+    else:
+        if agent_id is not None or caller_session_id is not None:
+            raise co.Refused('--agent-id and --caller-session-id require --agent-events')
+        message, source = agent_message(co, agent_output)
     try:
         data = message.encode('utf-8')
     except UnicodeEncodeError:
-        raise co.Refused('architect message is not encodable as UTF-8; save the response manually and report') from None
+        raise co.Refused('architect message is not encodable as UTF-8; preserve it and report, do not retype') from None
     if len(data) > co.MAX_DOC * 4:
         raise co.Refused('architect message exceeds the handoff size limit; preserve it and report')
     target = co.submission_draft_target(output)
