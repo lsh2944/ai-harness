@@ -2810,6 +2810,10 @@ def cmd_call(args):
                 return {'status': 'INCOMPLETE', 'problems': ['lossless request integrity check failed'], 'integrity': integrity}, 2
         if phase == 'fidelity' and basis is not None:
             basis['issue_ids'] = fidelity_coverage(session, ledger_doc, synthesis_doc, request=request)
+        if basis is not None:
+            # 争点単位の内容ハッシュ。判定後に一部の決定だけ直しても、変わっていない争点の確認を保てるようにする。
+            basis['issues'] = issue_digests(ledger_doc, synthesis_doc, basis['issue_ids'])
+            basis['shared'] = shared_digest(synthesis_doc, ledger_doc)
         auto_compact = False
         if len(request.encode('utf-8')) > MAX_REQUEST and not session.get('compact') and phase in ('debate', 'critique', 'rebuttal'):
             # 上限超過で止まる場合に限り、minify・重複 ID 化だけの compact で収まるならその呼び出しだけ compact で送る。
@@ -3747,6 +3751,72 @@ def check_basis(ledger, synthesis):
     return {'ledger': canonical_digest(ledger), 'synthesis': canonical_digest(synthesis, strip_checked=True)}
 
 
+# 争点単位の確認で全争点に共通して比べる synthesis 欄（Codex の立場を言い換え得る）。
+# ledger.states と synthesis.metrics は進行記録・集計なので含めない（2026-11-26 利用者承認）。
+SHARED_SYNTHESIS_FIELDS = ('required', 'optional', 'useful_from_codex', 'useful_none_reason')
+ISSUE_SYNTHESIS_GROUPS = ('decisions', 'user_decisions', 'unresolved')
+
+
+def _strip_checked(entry):
+    return {k: v for k, v in entry.items() if k != 'codex_checked'} if isinstance(entry, dict) else entry
+
+
+def shared_digest(synthesis, ledger):
+    """全争点に共通して比べる内容。共通欄に加え、ledger に無い ID を持つ synthesis 項目（どの争点の束にも入らない）も含める。"""
+    synthesis = synthesis or {}
+    ids = {i.get('id') for i in (ledger or {}).get('issues', []) if isinstance(i, dict)}
+    orphans = {group: [_strip_checked(e) for e in synthesis.get(group, [])
+                       if not (isinstance(e, dict) and e.get('issue_id') in ids)]
+               for group in ISSUE_SYNTHESIS_GROUPS}
+    return canonical_digest({'fields': {k: synthesis.get(k) for k in SHARED_SYNTHESIS_FIELDS}, 'orphans': orphans})
+
+
+def _referrers(ledger, synthesis, targets):
+    """targets のいずれかを本文・決定で ID 言及している他の争点（逆方向の言及）。"""
+    texts = {i['id']: json.dumps(i, ensure_ascii=False) for i in ledger['issues']}
+    for group in ISSUE_SYNTHESIS_GROUPS:
+        for entry in (synthesis or {}).get(group, []):
+            if isinstance(entry, dict) and entry.get('issue_id') in texts:
+                texts[entry['issue_id']] += json.dumps(entry, ensure_ascii=False)
+    pattern = re.compile(r'(?<![A-Za-z0-9])([A-Z]{1,2}\d{1,4})(?![0-9])')
+    return {ident for ident, text in texts.items()
+            if ident not in targets and targets & set(pattern.findall(text))}
+
+
+def issue_digests(ledger, synthesis, issue_ids):
+    """争点ごとに、その争点・ID で言及される関連争点（推移的）・その集合を ID で言及する他の争点の
+    ledger 項目と synthesis 項目を束ねた内容ハッシュ。codex_checked は除く。言及の追加・削除も差分になる。"""
+    issues = {i['id']: i for i in ledger.get('issues', []) if isinstance(i, dict)}
+    digests = {}
+    for ident in issue_ids:
+        related, _ = related_issues(ledger, synthesis, [ident])
+        related = related | _referrers(ledger, synthesis, related)
+        bundle = {'ledger': [issues[i] for i in sorted(related) if i in issues],
+                  'synthesis': {group: [_strip_checked(entry) for entry in (synthesis or {}).get(group, [])
+                                        if isinstance(entry, dict) and entry.get('issue_id') in related]
+                                for group in ISSUE_SYNTHESIS_GROUPS}}
+        digests[ident] = canonical_digest(bundle)
+    return digests
+
+
+def unchanged_issues(basis, ledger, synthesis):
+    """fidelity 時点から内容が変わっていない判定対象争点。争点単位の記録がない旧セッションや共通欄の変更では空。"""
+    basis = basis or {}
+    recorded = basis.get('issues')
+    if not isinstance(recorded, dict) or not basis.get('shared'):
+        return set()
+    # 停止後の finalize などで形式未検証の文書が来ても例外にせず、確認なしとして扱う。
+    if not isinstance(ledger, dict) or not isinstance(ledger.get('issues'), list) or not isinstance(synthesis, dict):
+        return set()
+    try:
+        if basis['shared'] != shared_digest(synthesis, ledger):
+            return set()
+        current = issue_digests(ledger, synthesis, list(recorded))
+    except (KeyError, TypeError, AttributeError):
+        return set()
+    return {ident for ident, digest in recorded.items() if current.get(ident) == digest}
+
+
 def basis_matches(session, ledger, synthesis):
     """fidelity 呼び出しの判定基準内容と現在の ledger・synthesis が同じか（基準記録がなければ None）。"""
     call = phase_call(session, 'fidelity')
@@ -3760,20 +3830,23 @@ def basis_matches(session, ledger, synthesis):
 def checked_issues(session, ledger=None, synthesis=None):
     """codex_checked=true を認める争点（D1）。
 
-    fidelity が faithful と判定し、その争点が呼び出しで判定を求めた対象（checked_basis.issue_ids）に含まれ、
-    呼び出しに使った ledger・synthesis の内容（codex_checked を除く）が現在と同じものだけ。
+    fidelity が faithful と判定し、その争点が呼び出しで判定を求めた対象（checked_basis.issue_ids）に含まれるもの。
+    ledger・synthesis 全体（codex_checked を除く）が呼び出し時と同じなら全件、変わっていれば共通欄が同じで
+    その争点と関連争点の内容が変わっていないものだけを残す（1 件の修正で他の確認まで失わないため）。
     round2 は討論であって統合案の確認ではないので根拠にしない。内容ハッシュのない旧セッションの呼び出しも認めない。
     """
     if session.get('conditional_used') != 'fidelity' or ledger is None or synthesis is None:
         return set()
     call = phase_call(session, 'fidelity')
-    if not call or call['execution'] != 'ok' or not basis_matches(session, ledger, synthesis):
+    matches = basis_matches(session, ledger, synthesis)
+    if not call or call['execution'] != 'ok' or matches is None:
         return set()
     result = codex_result(session, 'fidelity')
     if not result:
         return set()
     covered = set(call['checked_basis'].get('issue_ids') or [])
-    return {i['issue_id'] for i in result['issues'] if i['verdict'] == 'faithful'} & covered
+    faithful = {i['issue_id'] for i in result['issues'] if i['verdict'] == 'faithful'} & covered
+    return faithful if matches else faithful & unchanged_issues(call['checked_basis'], ledger, synthesis)
 
 
 # 表示用の韓国語ラベル（報告書はユーザー向け）。引用する Claude/Codex の本文は訳さない。
@@ -4057,11 +4130,28 @@ def render_report(session, summary, checked):
         lines += [f'- {i["issue_id"]}: {ko("verdict", i["verdict"])} — {_flat(i["detail"])}' for i in fidelity['issues']] \
             or ['- (판정 없음)']
         lines += [f'- 미확인: {_flat(u)}' for u in fidelity.get('unverified', [])]
-        covered = (phase_call(session, 'fidelity').get('checked_basis') or {}).get('issue_ids')
+        basis = phase_call(session, 'fidelity').get('checked_basis') or {}
+        covered = basis.get('issue_ids')
         lines.append(f'- 판정 대상 쟁점: {", ".join(covered) if covered else "(기록 없음)"}')
         matches = basis_matches(session, ledger, synthesis)
         lines.append('- 판정 기준 내용과 현재 통합안·원장 일치: '
                      + ('알 수 없음(기준 기록 없음)' if matches is None else ko('bool', matches)))
+        if matches is False:
+            # 判定後に変わった争点だけ確認を外す（争点単位の記録がない旧セッションは全件解除のまま）。
+            if not isinstance(basis.get('issues'), dict):
+                lines.append('- 판정 뒤 변경: 쟁점별 기록이 없는 세션이라 확인 전체 해제')
+            elif basis.get('shared') != shared_digest(synthesis, ledger):
+                lines.append('- 판정 뒤 변경: 공통 항목(필수·선택·Codex에서 얻은 점·원장에 없는 ID 항목)이 바뀌어 확인 전체 해제')
+            else:
+                # 一覧は faithful 判定の争点に限る（歪曲・欠落判定の争点は元から確認対象外）。
+                faithful = {i['issue_id'] for i in fidelity['issues'] if i['verdict'] == 'faithful'} & set(covered or [])
+                unchanged = unchanged_issues(basis, ledger, synthesis)
+                released = sorted(faithful - unchanged)
+                kept = sorted(faithful & unchanged)
+                revised = sorted(set(covered or []) - faithful - unchanged)
+                lines.append(f'- 충실 판정 뒤 내용이 바뀐 쟁점(확인 해제): {", ".join(released) if released else "없음"}')
+                lines.append(f'- 충실 판정 뒤 내용이 그대로인 쟁점(확인 유지): {", ".join(kept) if kept else "없음"}')
+                lines.append(f'- 왜곡·누락 판정 뒤 수정된 쟁점(Codex 미확인): {", ".join(revised) if revised else "없음"}')
     else:
         conditional = session.get('conditional') or {}
         used = session.get('conditional_used')

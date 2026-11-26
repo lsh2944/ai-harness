@@ -157,7 +157,7 @@ class RunnerStorageTests(unittest.TestCase):
                 result = self.rejected(sid, 'synthesis', self.draft(candidate))
                 self.assertEqual(result['status'], 'INVALID')
 
-    def test_fidelity_uses_candidate_content_and_derived_flags_bind_full_content(self):
+    def test_fidelity_uses_candidate_content_and_derived_flags_bind_issue_content(self):
         sid = self.final_ledger()
         self.submit(sid, 'synthesis', fx.synthesis())
         self.env.ok('call', '--session', sid, '--phase', 'fidelity')
@@ -166,7 +166,12 @@ class RunnerStorageTests(unittest.TestCase):
         output, _ = self.submit(sid, 'synthesis', candidate, None, '--derive-checked')
         self.assertEqual(output['derived_checked'], ['I1'])
         self.assertEqual([d['codex_checked'] for d in co.read_json_artifact(sid, 'synthesis.json')['decisions']], [True, False])
+        # 関連のない C1 の変更では I1 の確認は残る（争点単位の結び付け）。
         candidate['decisions'][1]['reason'] = 'changed after fidelity'
+        output, _ = self.submit(sid, 'synthesis', candidate, None, '--derive-checked')
+        self.assertEqual(output['derived_checked'], ['I1'])
+        # I1 自体を変えれば外れる。
+        candidate['decisions'][0]['reason'] = 'I1 changed after fidelity'
         output, source = self.submit(sid, 'synthesis', candidate, None, '--derive-checked')
         self.assertEqual(output['derived_checked'], [])
         saved = co.read_json_artifact(sid, 'synthesis.json')

@@ -1124,10 +1124,10 @@ class ReviewFollowUpTests(DebatedMixin, Base):
 class CheckedBindingTests(DebatedMixin, Base):
     """D1: Codex 確認表示を fidelity 時点の ledger・synthesis 内容に結び付ける。"""
 
-    def fidelity_done(self):
+    def fidelity_done(self, synthesis=None):
         sid = self.debated()
         self.env.write_artifact(sid, 'ledger.json', fx.final_ledger())
-        self.env.write_artifact(sid, 'synthesis.json', fx.synthesis())
+        self.env.write_artifact(sid, 'synthesis.json', synthesis or fx.synthesis())
         self.assertEqual(self.env.ok('synthesis', 'validate', '--session', sid)['next'], 'fidelity')
         self.env.ok('call', '--session', sid, '--phase', 'fidelity')
         return sid
@@ -1135,7 +1135,10 @@ class CheckedBindingTests(DebatedMixin, Base):
     def test_fidelity_records_content_basis(self):
         sid = self.fidelity_done()
         call = co.phase_call(self.env.session(sid), 'fidelity')
-        self.assertEqual(call['checked_basis'], dict(co.check_basis(fx.final_ledger(), fx.synthesis()), issue_ids=['I1']))
+        self.assertEqual(call['checked_basis'], dict(
+            co.check_basis(fx.final_ledger(), fx.synthesis()), issue_ids=['I1'],
+            issues=co.issue_digests(fx.final_ledger(), fx.synthesis(), ['I1']),
+            shared=co.shared_digest(fx.synthesis(), fx.final_ledger())))
         # codex_checked だけを変えた synthesis は同じ内容とみなす（確認後に旗を立てられる）。
         self.assertTrue(co.basis_matches(self.env.session(sid), fx.final_ledger(), fx.synthesis(checked=True)))
         self.env.write_artifact(sid, 'synthesis.json', fx.synthesis(checked=True))
@@ -1147,8 +1150,9 @@ class CheckedBindingTests(DebatedMixin, Base):
         self.assertEqual(co.checked_issues(session, fx.final_ledger(), fx.synthesis(checked=True)), {'I1'})
         for name, ledger, synthesis in (
                 ('synthesis edited', fx.final_ledger(), fx.synthesis(checked=True, conditions=['new condition'])),
-                ('ledger edited', fx.ledger([fx.final_ledger()['issues'][0], dict(fx.final_ledger()['issues'][1], title='changed')]),
-                 fx.synthesis(checked=True))):
+                ('ledger edited', fx.ledger([dict(fx.final_ledger()['issues'][0], title='changed'), fx.final_ledger()['issues'][1]]),
+                 fx.synthesis(checked=True)),
+                ('shared edited', fx.final_ledger(), dict(fx.synthesis(checked=True), required=['R1', 'R2']))):
             with self.subTest(case=name):
                 self.assertEqual(co.checked_issues(session, ledger, synthesis), set())
                 self.env.write_artifact(sid, 'ledger.json', ledger)
@@ -1161,10 +1165,103 @@ class CheckedBindingTests(DebatedMixin, Base):
         self.env.write_artifact(sid, 'synthesis.json', fx.synthesis(conditions=['new condition']))
         self.env.ok('synthesis', 'validate', '--session', sid)
         final = self.env.ok('finalize', '--session', sid)
-        self.assertIn('- 판정 기준 내용과 현재 통합안·원장 일치: 아니오', Path(final['report']).read_text())
+        report = Path(final['report']).read_text()
+        self.assertIn('- 판정 기준 내용과 현재 통합안·원장 일치: 아니오', report)
+        self.assertIn('- 충실 판정 뒤 내용이 바뀐 쟁점(확인 해제): I1', report)
         text = (self.env.artifacts / sid / 'artifacts/synthesis.md').read_text()
         self.assertNotIn('Codex 확인됨', text)
         self.assertIn('Claude 통합 판단(Codex 미확인)', text)
+
+    def test_fixing_another_issue_keeps_unchanged_check(self):
+        # 判定対象外の争点（C1）を直しても、内容が変わらない I1 の確認は残る（文書全体ハッシュでは全解除だった）。
+        sid = self.fidelity_done()
+        session = self.env.session(sid)
+        ledger = fx.ledger([fx.final_ledger()['issues'][0], dict(fx.final_ledger()['issues'][1], title='fixed')])
+        synthesis = fx.synthesis(checked=True)
+        synthesis['decisions'][1]['decision'] = 'Do Y with the corrected condition'
+        self.assertFalse(co.basis_matches(session, ledger, synthesis))
+        self.assertEqual(co.checked_issues(session, ledger, synthesis), {'I1'})
+        self.env.write_artifact(sid, 'ledger.json', ledger)
+        self.env.write_artifact(sid, 'synthesis.json', dict(synthesis, decisions=[dict(d, codex_checked=False)
+                                                                                   for d in synthesis['decisions']]))
+        self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
+        saved = json.loads((self.env.artifacts / sid / 'artifacts/synthesis.json').read_text())
+        self.assertEqual([d['codex_checked'] for d in saved['decisions']], [True, False])
+        final = self.env.ok('finalize', '--session', sid)
+        report = Path(final['report']).read_text()
+        self.assertIn('- 충실 판정 뒤 내용이 바뀐 쟁점(확인 해제): 없음', report)
+        self.assertIn('- 충실 판정 뒤 내용이 그대로인 쟁점(확인 유지): I1', report)
+        self.assertIn('Codex 확인됨(충실성 검사: 충실)', (self.env.artifacts / sid / 'artifacts/synthesis.md').read_text())
+
+    def test_change_to_mentioned_issue_removes_check(self):
+        # I1 の決定が C1 を ID で参照していれば、C1 の変更で I1 の確認も外れる。
+        sid = self.fidelity_done(fx.synthesis(conditions=['only together with C1']))
+        session = self.env.session(sid)
+        synthesis = fx.synthesis(checked=True, conditions=['only together with C1'])
+        self.assertEqual(co.checked_issues(session, fx.final_ledger(), synthesis), {'I1'})
+        synthesis['decisions'][1]['decision'] = 'Do Z instead'
+        self.assertEqual(co.checked_issues(session, fx.final_ledger(), synthesis), set())
+
+    def test_reverse_mention_orphan_and_issue_entries_remove_check(self):
+        # 逆方向の言及・ledger に無い ID の項目・その争点の user_decisions/unresolved・争点削除は確認を外す。
+        sid = self.fidelity_done()
+        session = self.env.session(sid)
+        base = fx.synthesis(checked=True)
+        self.assertEqual(co.checked_issues(session, fx.final_ledger(), base), {'I1'})
+        reverse = fx.synthesis(checked=True)
+        reverse['decisions'][1]['conditions'] = ['I1 does not apply under this condition']
+        orphan = dict(fx.synthesis(checked=True),
+                      user_decisions=[{'issue_id': 'Z9', 'question': 'new question', 'options': ['a', 'b']}])
+        own_user = dict(fx.synthesis(checked=True),
+                        user_decisions=[{'issue_id': 'I1', 'question': 'pick', 'options': ['a', 'b']}])
+        own_unresolved = dict(fx.synthesis(checked=True),
+                              unresolved=[{'issue_id': 'I1', 'impact': 'x', 'needed_evidence': 'y', 'blocking': False}])
+        # ledger から I1 を消すと I1 の決定が ledger 外 ID 項目になり、共通ハッシュの経路で全件解除される。
+        removed = fx.ledger([fx.final_ledger()['issues'][1]])
+        # ledger は残して I1 の決定だけ消すと、共通ハッシュは同じまま I1 の束だけが変わる（争点束の経路）。
+        decision_removed = dict(fx.synthesis(checked=True), decisions=[fx.synthesis(checked=True)['decisions'][1]])
+        self.assertEqual(co.shared_digest(decision_removed, fx.final_ledger()), co.shared_digest(base, fx.final_ledger()))
+        for name, ledger, synthesis in (('reverse mention', fx.final_ledger(), reverse),
+                                        ('orphan user decision', fx.final_ledger(), orphan),
+                                        ('own user decision', fx.final_ledger(), own_user),
+                                        ('own unresolved', fx.final_ledger(), own_unresolved),
+                                        ('issue removed (shared path)', removed, base),
+                                        ('decision removed (issue bundle path)', fx.final_ledger(), decision_removed)):
+            with self.subTest(case=name):
+                self.assertEqual(co.checked_issues(session, ledger, synthesis), set())
+        # 共通欄の変更は報告 8 節で全件解除として示す。
+        self.env.write_artifact(sid, 'synthesis.json', dict(orphan, decisions=[dict(d, codex_checked=False)
+                                                                              for d in orphan['decisions']]))
+        self.env.ok('synthesis', 'validate', '--session', sid)
+        report = Path(self.env.ok('finalize', '--session', sid)['report']).read_text()
+        self.assertIn('원장에 없는 ID 항목)이 바뀌어 확인 전체 해제', report)
+
+    def test_malformed_documents_do_not_raise(self):
+        sid = self.fidelity_done()
+        basis = co.phase_call(self.env.session(sid), 'fidelity')['checked_basis']
+        for ledger, synthesis in (({'issues': [{'no_id': 1}]}, fx.synthesis()), ({'issues': 'x'}, fx.synthesis()),
+                                  (fx.final_ledger(), {'decisions': 'x'}), (None, None)):
+            with self.subTest(ledger=ledger, synthesis=synthesis):
+                self.assertEqual(co.unchanged_issues(basis, ledger, synthesis), set())
+
+    def test_old_basis_without_issue_digests_keeps_whole_document_rule(self):
+        sid = self.fidelity_done()
+        session = self.env.session(sid)
+        call = co.phase_call(session, 'fidelity')
+        for key in ('issues', 'shared'):
+            call['checked_basis'].pop(key)
+        ledger = fx.ledger([fx.final_ledger()['issues'][0], dict(fx.final_ledger()['issues'][1], title='fixed')])
+        self.assertEqual(co.checked_issues(session, fx.final_ledger(), fx.synthesis(checked=True)), {'I1'})
+        self.assertEqual(co.checked_issues(session, ledger, fx.synthesis(checked=True)), set())
+
+    def test_progress_fields_do_not_remove_check(self):
+        # ledger.states と synthesis.metrics は進行記録なので、変えても確認は外れない。
+        sid = self.fidelity_done()
+        session = self.env.session(sid)
+        ledger = dict(fx.final_ledger(), states={'execution': 'done', 'evidence_sufficiency': 'partial', 'agreement': 'partial'})
+        synthesis = fx.synthesis(checked=True)
+        synthesis['metrics'] = dict(synthesis['metrics'], unbacked_claims=0)
+        self.assertEqual(co.checked_issues(session, ledger, synthesis), {'I1'})
 
     def test_faithful_on_unlisted_issue_is_not_checked(self):
         # M1: 依頼していない争点（C1）への faithful は問題として記録し、確認根拠にしない。
@@ -1843,7 +1940,7 @@ class FidelitySerializationTests(Base):
         self.assertEqual(co.build_request(session, 'fidelity', compact=True),
                          co._build_full_request(session, 'fidelity', compact=True))
 
-    def test_no_savings_uses_full_packet_and_stale_unlisted_issue_still_invalidates_checked(self):
+    def test_no_savings_uses_full_packet_and_unlisted_issue_change_keeps_unrelated_check(self):
         sid, session = self.ready()
         document = co.read_json_artifact(sid, 'synthesis.json')
         (co.art(sid) / 'synthesis.json').write_text(co.minify(document))
@@ -1856,8 +1953,19 @@ class FidelitySerializationTests(Base):
         self.env.ok('synthesis', 'validate', '--session', sid)
         self.env.ok('call', '--session', sid, '--phase', 'fidelity')
         self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
+        flags = [d['codex_checked'] for d in co.read_json_artifact(sid, 'synthesis.json')['decisions']]
+        self.assertTrue(any(flags))
+        # 判定対象外で関連もない争点の変更では、変わっていない争点の確認は残る（争点単位の結び付け）。
         ledger = co.read_json_artifact(sid, 'ledger.json')
         ledger['issues'][-1]['title'] = 'low issue changed after checking'
+        self.env.write_artifact(sid, 'ledger.json', ledger)
+        self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
+        self.assertEqual([d['codex_checked'] for d in co.read_json_artifact(sid, 'synthesis.json')['decisions']], flags)
+        # 確認済み争点そのものを変えれば外れる。
+        checked_ids = {d['issue_id'] for d, f in zip(co.read_json_artifact(sid, 'synthesis.json')['decisions'], flags) if f}
+        for item in ledger['issues']:
+            if item['id'] in checked_ids:
+                item['title'] = 'checked issue changed after checking'
         self.env.write_artifact(sid, 'ledger.json', ledger)
         self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
         self.assertFalse(any(d['codex_checked'] for d in co.read_json_artifact(sid, 'synthesis.json')['decisions']))
@@ -1880,8 +1988,12 @@ class FormatAssistanceTests(DebatedMixin, Base):
         audit = json.loads(Path(output['format_revision']).read_text())
         self.assertEqual(audit['original_utf8'].encode(), original)
         self.assertEqual(len(audit['changes']), 2)
-        # Full content binding still invalidates derived flags after any content edit.
+        # 争点単位の結び付け: 関連のない C1 の変更では I1 の確認は残り、I1 自体を変えると外れる。
         saved['decisions'][1]['reason'] = 'changed later'
+        self.env.write_artifact(sid, 'synthesis.json', saved)
+        self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
+        self.assertEqual([i['codex_checked'] for i in co.read_json_artifact(sid, 'synthesis.json')['decisions']], [True, False])
+        saved['decisions'][0]['reason'] = 'I1 changed later'
         self.env.write_artifact(sid, 'synthesis.json', saved)
         self.env.ok('synthesis', 'validate', '--session', sid, '--derive-checked')
         self.assertFalse(any(i['codex_checked'] for i in co.read_json_artifact(sid, 'synthesis.json')['decisions']))
