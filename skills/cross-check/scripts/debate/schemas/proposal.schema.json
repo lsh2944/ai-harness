@@ -16,6 +16,7 @@
   "assumptions",
   "evidence",
   "research",
+  "exploration",
   "open_questions",
   "unverified"
  ],
@@ -302,6 +303,82 @@
     },
     "not_applicable_reason": {
      "type": "string"
+    }
+   }
+  },
+  "exploration": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "applicable",
+    "not_applicable_reason",
+    "target_architecture",
+    "candidates",
+    "chosen",
+    "current_gap",
+    "migration_path",
+    "compromises"
+   ],
+   "properties": {
+    "applicable": {
+     "type": "boolean"
+    },
+    "not_applicable_reason": {
+     "type": "string"
+    },
+    "target_architecture": {
+     "type": "string"
+    },
+    "candidates": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "name",
+       "approach",
+       "tradeoffs",
+       "basis"
+      ],
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "approach": {
+        "type": "string"
+       },
+       "tradeoffs": {
+        "type": "string"
+       },
+       "basis": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "chosen": {
+     "type": "string"
+    },
+    "current_gap": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "migration_path": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "compromises": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
     }
    }
   },

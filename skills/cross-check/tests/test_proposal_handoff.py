@@ -27,7 +27,7 @@ class ProposalHandoffTests(SubmissionBase):
             'implementation_order': ['確認してから実装'], 'validation': [{'check': '境界ケース', 'layer': 'mock'}],
             'risks': [{'severity': 'high', 'risk': '契約の差', 'mitigation': '原文を照合'}],
             'assumptions': ['条件 A'], 'open_questions': ['C を誰が確認するか'], 'unverified': ['実環境'],
-            'research': fx.no_research(),
+            'research': fx.no_research(), 'exploration': fx.no_exploration(),
             'evidence': [{'id': 'local:source_a', 'kind': 'file', 'ref': 'src/app.py:L1-L2', 'observation': observation},
                          {'id': 'E1', 'kind': 'brief', 'ref': 'brief:L2', 'observation': 'requirement'},
                          {'id': 'E2', 'kind': 'inference', 'ref': 'inputs/data/raw.csv', 'observation': 'unverified inference'}]}
@@ -459,6 +459,21 @@ class ProposalHandoffTests(SubmissionBase):
         message['proposal']['summary'] += ' see local:source_a for the condition'
         result, _ = self.prepare(sid, message, False)
         self.assertIn('prose', result['error'])
+
+    def test_exploration_local_basis_and_bad_shape_are_rejected_at_prepare(self):
+        # 設計探索欄も prepare で検査する: basis の local キーは本文扱いで拒否、意味違反は SchemaError。
+        explored = {'applicable': True, 'not_applicable_reason': '', 'target_architecture': 't',
+                    'candidates': [{'name': 'A', 'approach': 'a', 'tradeoffs': 't', 'basis': ['local:source_a']},
+                                   {'name': 'B', 'approach': 'b', 'tradeoffs': 't', 'basis': ['src/app.py:L1-L2']}],
+                    'chosen': 'A', 'current_gap': [], 'migration_path': [], 'compromises': []}
+        for exploration, message in ((explored, 'prose'), (explored | {'candidates': explored['candidates'][1:]},
+                                                           'at least two candidates')):
+            with self.subTest(message=message):
+                sid = self.proposed()
+                handoff = self.message()
+                handoff['proposal']['exploration'] = exploration
+                result, _ = self.prepare(sid, handoff, False)
+                self.assertIn(message, result['error'])
 
     def test_duplicate_missing_and_ambiguous_manifest_references_are_rejected(self):
         sid = self.proposed()

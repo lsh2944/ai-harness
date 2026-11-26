@@ -31,6 +31,19 @@
       "papers": [{"title": "논문 제목", "url": "https://arxiv.org/abs/0000.00000", "year": "2025", "relevance": "이 질문과의 관련성"}],
       "not_applicable_reason": ""
     },
+    "exploration": {
+      "applicable": true,
+      "not_applicable_reason": "",
+      "target_architecture": "현재 제약을 잠시 뺀, 조사에 근거한 목표 구조",
+      "candidates": [
+        {"name": "A", "approach": "현재 구조를 확장하는 접근", "tradeoffs": "장점·단점과 적용 조건", "basis": ["E1"]},
+        {"name": "B", "approach": "현재 구조를 전제하지 않는, 핵심 구조가 다른 접근", "tradeoffs": "장점·단점과 적용 조건", "basis": ["https://example.org/actual-page-you-opened"]}
+      ],
+      "chosen": "A",
+      "current_gap": ["현재 구조와 목표의 차이"],
+      "migration_path": ["현재에서 목표로 가는 단계"],
+      "compromises": ["현실 제약으로 목표에서 물러선 지점과 이유"]
+    },
     "open_questions": ["사용자 판단이 필요한 미정 사항"],
     "unverified": ["검증하지 못한 사항과 영향"]
   },

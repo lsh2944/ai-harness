@@ -19,6 +19,12 @@ def no_research():
     return {'question_date': time.strftime('%Y-%m-%d'), 'web_used': False, 'trends': [], 'common_practices': [],
             'papers': [], 'not_applicable_reason': 'scope has no web'}
 
+
+def no_exploration():
+    """設計探索が不要な提案の探索欄（単純な修正として扱う）。"""
+    return {'applicable': False, 'not_applicable_reason': 'plain fix', 'target_architecture': '', 'candidates': [],
+            'chosen': '', 'current_gap': [], 'migration_path': [], 'compromises': []}
+
 # 偽 codex。--version と exec だけを模倣し、argv・phase を記録する。
 FAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, signal, subprocess, sys, time
@@ -75,6 +81,8 @@ if phase == 'proposal':
                            {'id': 'X3', 'kind': 'brief', 'ref': 'brief:L1', 'observation': 'question'}],
               'research': {'question_date': time.strftime('%Y-%m-%d'), 'web_used': False, 'trends': [],
                            'common_practices': [], 'papers': [], 'not_applicable_reason': 'scope has no web'},
+              'exploration': {'applicable': False, 'not_applicable_reason': 'plain fix', 'target_architecture': '',
+                              'candidates': [], 'chosen': '', 'current_gap': [], 'migration_path': [], 'compromises': []},
               'open_questions': [], 'unverified': []}
 elif phase == 'verify':
     # 版ゲートの自動点検: プローブ命令は実行し、秘密経路の命令は hook 拒否行だけを stderr に出す（実測形）。
@@ -250,7 +258,7 @@ class Env:
                 'design': {'components': ['c2'], 'flows': ['f2'], 'contracts': ['k2']},
                 'alternatives': [], 'implementation_order': ['s'], 'validation': [{'check': 'unit', 'layer': 'mock'}],
                 'risks': [], 'assumptions': [], 'open_questions': [], 'unverified': ['runtime'],
-                'research': no_research(),
+                'research': no_research(), 'exploration': no_exploration(),
                 'evidence': [{'id': evidence, 'kind': 'file', 'ref': 'src/app.py:L2-L3', 'observation': 'seen'},
                              {'id': 'E9', 'kind': 'inference', 'ref': 'reasoning', 'observation': 'inferred'}]}
 

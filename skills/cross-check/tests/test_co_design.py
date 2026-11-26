@@ -1410,12 +1410,13 @@ class ReportTests(Base):
         self.assertNotIn('Claude view', initial)
         self.assertNotIn('Codex view', initial)
         headings = [line for line in text.splitlines() if line.startswith('## ')]
-        self.assertEqual([h.split('.')[0] for h in headings], [f'## {n}' for n in range(1, 12)])
+        self.assertEqual([h.split('.')[0] for h in headings], [f'## {n}' for n in range(1, 13)])
         self.assertEqual(headings, ['## 1. 질문·요구사항', '## 2. Claude 제안', '## 3. Codex 제안',
                                     '## 4. Claude→Codex 문제 제기와 응답', '## 5. Codex→Claude 문제 제기와 응답',
                                     '## 6. 쟁점별 판정', '## 7. 토론 결과(결정·채택 출처·이유·조건·잔여 위험)',
                                     '## 8. 충실성 검사', '## 9. 사용자 결정·미해결', '## 10. 비용',
-                                    '## 11. 외부 조사(최신 동향·일반 기술·논문)'])
+                                    '## 11. 외부 조사(최신 동향·일반 기술·논문)',
+                                    '## 12. 설계 탐색(목표 아키텍처·후보 비교·현재와의 차이)'])
         for expected in ('# 토론 보고서: q-test', '최종 상태: 완료', '> Question: how should X work?', '- 요약: Claude design.',
                          '- 요약: Codex design.', '- 상태: 완료 / 근거 충분성: 충분', '  - [중간] r → 완화: m',
                          '### I1 [높음/설계 트레이드오프] Issue I1', 'Codex 출력 원문(토론, 반대): because',

@@ -1868,7 +1868,28 @@ def proposal_semantics(result, side, session):
     if result['status'] == 'INCOMPLETE' and not result['unverified']:
         problems.append('INCOMPLETE proposal without unverified items')
     problems += research_semantics(result['research'], side)
+    problems += exploration_semantics(result['exploration'], side)
     return problems
+
+
+def exploration_semantics(exploration, side):
+    """設計探索欄の意味検査。Claude 側は凍結前に直せる引き継ぎなので拒否、Codex 側は問題として残し提案は保持する。"""
+    errors = []
+    if exploration['applicable']:
+        names = [c['name'].strip() for c in exploration['candidates']]
+        if len(names) < 2:
+            errors.append('exploration needs at least two candidates when applicable')
+        if any(not n for n in names) or len(names) != len(set(names)):
+            errors.append('exploration candidate names must be unique and non-empty')
+        if exploration['chosen'].strip() not in names:
+            errors.append('exploration chosen must name one of the candidates')
+        if not exploration['target_architecture'].strip():
+            errors.append('exploration needs target_architecture when applicable')
+    elif not exploration['not_applicable_reason'].strip():
+        errors.append('exploration marked not applicable needs not_applicable_reason')
+    if side == 'claude' and errors:
+        raise SchemaError(errors[0])
+    return errors
 
 
 def question_date(session):
@@ -3885,11 +3906,17 @@ def _proposal_section(title, proposal):
     return lines
 
 
+# 後から必須にした提案欄（古いセッションの凍結済み提案には無い）
+LATER_PROPOSAL_FIELDS = ('research', 'exploration')
+
+
 def _report_proposal(proposal):
-    """報告用の検証。research 追加前に凍結した提案は、その欄だけ任意として扱う（凍結・呼び出しの検証は現行スキーマのまま）。"""
-    if isinstance(proposal, dict) and 'research' not in proposal:
+    """報告用の検証。research・exploration 追加前に凍結した提案は、欠けている欄だけ任意として扱う
+    （凍結・呼び出しの検証は現行スキーマのまま）。"""
+    later = [k for k in LATER_PROPOSAL_FIELDS if isinstance(proposal, dict) and k not in proposal]
+    if later:
         schema = load_schema('proposal')
-        schema['required'] = [k for k in schema['required'] if k != 'research']
+        schema['required'] = [k for k in schema['required'] if k not in later]
         try:
             check_schema(proposal, schema)
             check_lengths(proposal)
@@ -4071,7 +4098,44 @@ def render_report(session, summary, checked):
     lines.append(f'- 요약 누락: {summary["summaries_missing"]}건 / 위반: {violations}')
     lines.append('- 토큰은 Codex 호출의 provider 보고값이며 Claude 쪽 사용량은 포함하지 않는다.')
     lines += _research_section(sid, claude_proposal, codex_proposal)
+    lines += _exploration_section(claude_proposal, codex_proposal)
     return '\n'.join(lines) + '\n'
+
+
+def _exploration_section(claude_proposal, codex_proposal):
+    """12 節: 両側の設計探索（目標アーキテクチャ・候補比較・現在との差・移行経路）を並べる。"""
+    lines = ['', '## 12. 설계 탐색(목표 아키텍처·후보 비교·현재와의 차이)']
+    schema = load_schema('proposal')['properties']['exploration']
+    for name, proposal in (('Claude', claude_proposal), ('Codex', codex_proposal)):
+        proposal = proposal if isinstance(proposal, dict) else {}
+        exploration = proposal.get('exploration')
+        try:
+            check_schema(exploration, schema)
+        except SchemaError:
+            missing = 'exploration' not in proposal
+            lines += ['', f'### {name}', '- 탐색 기록 없음(' + ('이 세션의 제안에 exploration 필드가 없음' if missing
+                                                       else 'exploration 형식이 유효하지 않음') + ')']
+            continue
+        lines += ['', f'### {name}']
+        if not exploration['applicable']:
+            lines.append(f'- 해당 없음: {_flat(exploration["not_applicable_reason"])}')
+            filled = (exploration['candidates'] or exploration['target_architecture'].strip()
+                      or any(exploration[k] for k in ('current_gap', 'migration_path', 'compromises')))
+            if not filled:
+                continue
+            # 矛盾した提出でも内容を報告から落とさない（拒否はしない）。
+            lines.append(f'- 해당 없음이지만 탐색 내용이 제출됨(후보 {len(exploration["candidates"])}개). 제출 내용은 아래와 같다.')
+        lines.append(f'- 목표 아키텍처: {_flat(exploration["target_architecture"])}')
+        lines.append(f'- 선택: {_flat(exploration["chosen"])}')
+        lines += ['', '| 후보 | 접근 | 트레이드오프 | 근거 |', '| --- | --- | --- | --- |']
+        for c in exploration['candidates']:
+            mark = ' (선택)' if c['name'].strip() == exploration['chosen'].strip() else ''
+            lines.append(f'| {_cell(c["name"] + mark)} | {_cell(c["approach"])} | {_cell(c["tradeoffs"])} | '
+                         f'{_cell(", ".join(c["basis"]) or "-")} |')
+        for label, key in (('현재와의 차이', 'current_gap'), ('수정 경로', 'migration_path'), ('타협한 지점', 'compromises')):
+            lines.append(f'- {label}:')
+            lines += [f'  - {_flat(x)}' for x in exploration[key]] or ['  - (없음)']
+    return lines
 
 
 RESEARCH_LABELS = {'trends': '최신 동향', 'common_practices': '일반적인 구현·기술', 'papers': '관련 논문'}
@@ -4675,6 +4739,14 @@ def neutral_architect_prompt(output):
         'kind web 근거(ref는 URL 하나)에 기록하세요. 검색어에는 일반 기술 용어만 쓰고 로컬 코드·경로·사내 식별자·비밀을 넣지 마세요. '
         'web이 없거나 조사할 의미가 없으면 web_used false와 빈 목록, not_applicable_reason을 쓰세요. '
         'research.question_date에는 위 question_date를 그대로 쓰세요.\n'
+        # 現行構造の延長で結論を先に決めないよう、探索の順序と記録先を固定する。
+        '설계·아키텍처 판단이 있는 질문이면 결론을 먼저 정하지 말고 다음 순서로 생각해 proposal.exploration에 기록하세요: '
+        '① 조사와 현재 제약을 잠시 뺀 목표 아키텍처(target_architecture) ② 핵심 구조가 서로 다른 후보 2~3개(candidates, '
+        '매개변수만 다른 변형은 별도 후보가 아니며 현재 구조를 전제하지 않는 후보를 1개 이상 포함, '
+        'basis에는 E<n>·URL·path:Lx-Ly를 쓰고 local:<key>는 쓰지 않음) '
+        '③ 비교 후 선택(chosen은 후보 name 중 하나) ④ 현재 구조와의 차이(current_gap) ⑤ 수정 경로(migration_path)와 '
+        '현실 제약으로 목표에서 물러선 지점(compromises). 단순 버그 수정·사실 확인처럼 탐색이 의미 없으면 '
+        'applicable false와 not_applicable_reason을 쓰고 나머지는 빈 값으로 두세요.\n'
         'file 근거의 줄 수·lines·ref·file_sha256은 evidence_inspect 명령에 --file <절대경로>와 '
         '--lines <a-b> 또는 --whole-file을 주어 얻은 값을 그대로 쓰세요. 이 검사는 읽기 전용이며 등록하지 않습니다. '
         '범위를 추측·자동 보정하지 말고, 빈 파일의 null 범위를 file 근거로 제출하지 마세요.\n'
